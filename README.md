@@ -5,24 +5,22 @@ A powerful and lightweight WhatsApp bot for automating messages, handling comman
 ---
 
 # ✨ Features
-💬 Automated message replies
+• 💬 Automated message replies
+• 📌 Command-based system (/help, /menu, etc.)
+• ⚡ Fast and real-time responses
+• 📁 Support for media (images, audio, documents)
 
-📌 Command-based system (/help, /menu, etc.)
+• 🔗 Easy API integrations
 
-⚡ Fast and real-time responses
+• 🔐 Session management and authentication
 
-📁 Support for media (images, audio, documents)
-
-🔗 Easy API integrations
-
-🔐 Session management and authentication
-
-🛠️ Easily customizable and extendable
+• 🛠️ Easily customizable and extendable
 
 ---
 
 # 🚀 Getting Started
 1. **Clone the Repository**
+   
  <a href="https://github.com/Emmyfrosh001/Emmyfrosh-Ai/fork"><img title="EMMYFROSH-AI" src="https://img.shields.io/badge/FORK-EMMYFROSH AI-h?color=blue&style=for-the-badge&logo=stackshare"></a>
 
 ---
