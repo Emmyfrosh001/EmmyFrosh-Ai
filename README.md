@@ -1,6 +1,8 @@
 # Emmyfrosh-Ai 
-🚀 By Emmyfrosh
-A powerful and lightweight WhatsApp bot for automating messages, handling commands, and building smart chat solutions
+*🚀 By Emmyfrosh*
+A powerful and lightweight WhatsApp bot for automating messages, handling commands, and building smart chat solutions.
+
+---
 
 # ✨ Features
 💬 Automated message replies
