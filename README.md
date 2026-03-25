@@ -6,8 +6,11 @@ A powerful and lightweight WhatsApp bot for automating messages, handling comman
 
 # ✨ Features
 • 💬 Automated message replies
+
 • 📌 Command-based system (/help, /menu, etc.)
+
 • ⚡ Fast and real-time responses
+
 • 📁 Support for media (images, audio, documents)
 
 • 🔗 Easy API integrations
