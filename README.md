@@ -25,13 +25,13 @@ A powerful and lightweight WhatsApp bot for automating messages, handling comman
 
 ---
 
-### 🚀 Getting Started
+##  Deployment Steps
 
-1. _**Clone the Repository**_
+### ✅ First: Star and Fork the Repo
 
-   make sure you clone this 👇👇
-   
- <a href="https://github.com/Emmyfrosh001/Emmyfrosh-Ai/fork"><img title="EMMYFROSH-AI" src="https://img.shields.io/badge/FORK-EMMYFROSH AI-h?color=blue&style=for-the-badge&logo=stackshare"></a
+<a href='https://github.com/Emmyfrosh001/EmmyFrosh-Ai/fork' target="_blank">
+  <img src='https://img.shields.io/badge/FORK_REPOSITORY-008000?style=for-the-badge&logo=github&logoColor=white&labelColor=000000'/>
+</a>
 
  ---
 
