@@ -28,28 +28,14 @@ A powerful and lightweight WhatsApp bot for automating messages, handling comman
 ### 🚀 Getting Started
 
 1. _**Clone the Repository**_
+
+   make sure you clone this 👇👇
    
- <a href="https://github.com/Emmyfrosh001/Emmyfrosh-Ai/fork"><img title="EMMYFROSH-AI" src="https://img.shields.io/badge/FORK-EMMYFROSH AI-h?color=blue&style=for-the-badge&logo=stackshare"></a>
+ <a href="https://github.com/Emmyfrosh001/Emmyfrosh-Ai/fork"><img title="EMMYFROSH-AI" src="https://img.shields.io/badge/FORK-EMMYFROSH AI-h?color=blue&style=for-the-badge&logo=stackshare"></a
 
----
+ ---
 
-# ⚙️ Environment Setup
-
-Create a .env file:
-SESSION_NAME=emmyfrosh-bot
-PREFIX=/
-
----
-
-## ▶️ Run Your Bot
-
-npm start
-or
-index.js
-
----
-
-## 📲 Connect to WhatsApp
+## 2. 📲 Connect to WhatsApp
 
 Run the bot
 Scan the QR code from your terminal
