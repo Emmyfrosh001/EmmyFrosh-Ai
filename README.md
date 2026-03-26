@@ -1,5 +1,5 @@
 # Emmyfrosh-Ai 
-🚀 By Emmyfrosh                           
+_**🚀 By Emmyfrosh**_                          
 A powerful and lightweight WhatsApp bot for automating messages, handling commands, and building smart chat solutions.
 
 ---
@@ -22,7 +22,7 @@ A powerful and lightweight WhatsApp bot for automating messages, handling comman
 ---
 
 # 🚀 Getting Started
-1. **Clone the Repository**
+1. _**Clone the Repository**_
    
  <a href="https://github.com/Emmyfrosh001/Emmyfrosh-Ai/fork"><img title="EMMYFROSH-AI" src="https://img.shields.io/badge/FORK-EMMYFROSH AI-h?color=blue&style=for-the-badge&logo=stackshare"></a>
 
@@ -49,8 +49,17 @@ Open WhatsApp → Linked Devices → Link Device
 
 ---
 
-# 👨‍💻 Author
+## 👨‍💻 Author
 _*Emmyfrosh*_
 Building simple but powerful bots 🚀
 
+---
+
+## 📢 Community
+
+- **WhatsApp Chat channel**  
+  [Join Channel](https://whatsapp.com/channel/0029Vb7IMwt3wtbAKXyJxR1g)
+ 
+- **WhatsApp group**  
+  [Join Group](https://chat.whatsapp.com/ELlXLX5dCK7GFFByd2t4pv?mode=gi_t)
 
