@@ -27,7 +27,7 @@ A powerful and lightweight WhatsApp bot for automating messages, handling comman
 
 ##  Deployment Steps
 
-### ✅ First: Star and Fork the Repo
+### 1. ✅ First: Star and Fork the Repo👇👇👇👇
 
 <a href='https://github.com/Emmyfrosh001/EmmyFrosh-Ai/fork' target="_blank">
   <img src='https://img.shields.io/badge/FORK_REPOSITORY-008000?style=for-the-badge&logo=github&logoColor=white&labelColor=000000'/>
