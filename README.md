@@ -1,6 +1,7 @@
 # Emmyfrosh-Ai 
 
 <img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/96854eff-2bd2-4fa4-8406-2d905823fcb5" />
+
 _**🚀 By Emmyfrosh**_                          
 A powerful and lightweight WhatsApp bot for automating messages, handling commands, and building smart chat solutions.
 
