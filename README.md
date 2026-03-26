@@ -55,6 +55,10 @@ Open WhatsApp → Linked Devices → Link Device
 
 ---
 
+## ⚙️ Deployment Options
+
+---
+
 ## 👨‍💻 Author
 
 _*Emmyfrosh*_
@@ -62,7 +66,13 @@ Building simple but powerful bots 🚀
 
 ---
 
-## 📢 Community
+## 🧾 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 📢 Community 
 
 - **WhatsApp Chat channel**  
   [Join Channel](https://whatsapp.com/channel/0029Vb7IMwt3wtbAKXyJxR1g)
