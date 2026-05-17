@@ -1,0 +1,29 @@
+# Ignore main bot files
+
+main.js
+
+handler.js
+
+store.js
+
+# Ignore folders
+
+plugins/
+
+lib/
+
+tmp/
+
+session/
+
+database/
+
+node_modules/
+
+# Ignore environment files
+
+.env
+
+# Ignore logs
+
+*.log
