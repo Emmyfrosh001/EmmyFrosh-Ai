@@ -1,0 +1,152 @@
+{
+  "name": "EMMYFROSH-AI",
+  "description": "A Dynamic Whatsapp bot",
+  "logo": "https://files.catbox.moe/3m1vb1.png",
+  "keywords": ["Wabot", "WhatsApp", "nodejs"],
+  "success_url": "/",
+  "stack": "heroku-24",
+  "env": {
+    "PREFIX": {
+      "description": "Enter your desired prefix for bot leave blank for no prefix prefix `| . | .!*`",
+      "value": ", ! ^ . ?",
+      "required": false
+    },
+    "SESSION_ID": {
+      "description": "input bot session id here the one you received when you paired",
+      "value": "",
+      "required": true
+    },
+    "DATABASE_URL": {
+      "description": "input a database url you can use either postgresql or mognodb to save your bot changes and save your database check our youtube page for tutorials on how to",
+      "value": "",
+      "required": false 
+    },
+    "THUMB": {
+      "description": "This image will show when you used a 2/3 menu type add your image url for multiple images use , as split to send image randomly leave blank to use default",
+      "value": "",
+      "required": false
+    },
+    "START_MSG": {
+      "description": "Set to true after the welcome message has been sent",
+      "value": "true",
+      "required": false
+    },
+    "OWNER_NAME": {
+      "description": "put your bot owner name here",
+      "value": "Patron",
+      "required": false
+    },
+    "TIME_ZONE": {
+      "description": "set your desired timezone continuent follow by your city mistake might cause error in console or crash the bot",
+      "value": "Africa/Lagos",
+      "required": false
+    },
+    "MENU_TYPE": {
+      "description": "set your desired menu type 1 for only plain text, 2 for thumbnail menu 3 for only image menu leave blank to set to default",
+      "value": "",
+      "required": false
+    },
+    "BOT_NAME": {
+      "description": "set your desired bot name.",
+      "value": "",
+      "required": false
+    },
+    "OWNER_NUMBER": {
+      "description": "The phone numbers of the users who you want to be admin for the bot (should be in international format without + \",\").",
+      "value": "233537547164",
+      "required": false
+    },
+    "SUDO": {
+      "description": "The phone numbers of the users who you want to be sub admin for the bot for multiple number , as split (should be in international format without + \",\").",
+      "value": "233537547164",
+      "required": false
+    },
+    "PACK_NAME": {
+      "description": "This would show as your sticker packname leave blank to use default",
+      "value": "",
+      "required": false
+    },
+     "REACT": {
+      "description": "To enable auto reaction when set to cmd it bring a reaction animation to plugin command but when set to all it send reaction to all messages leave blank to off",
+      "value": "",
+      "required": false
+    },
+      "MODE": {
+      "description": "Use this to set your bot mode to either public or private when in public everyone has access when it private only bot owner and sudo have access",
+      "value": "private",
+      "required": true
+    },
+      "CALL": {
+      "description": "to toggle anticall either to block caller when set to block and reject to reject call only leave blank to off",
+      "value": "",
+      "required": false
+    },
+      "STATUS": {
+      "description": "set true to make the bot automatically view your status",
+      "value": "false",
+      "required": false
+    },
+      "READ": {
+      "description": "Set true to make the bot automatically read your messages",
+      "value": "false",
+      "required": false
+    },
+      "WELCOME": {
+      "description": "To automatically turn on welcome message in all group",
+      "value": "false",
+      "required": false
+    },
+       "GOODBYE": {
+      "description": "To automatically turn on goodbye message in all group",
+      "value": "false",
+      "required": false
+    },
+     "AUTHOR": {
+      "description": "This would show as your sticker author leave blank to use default",
+      "value": "",
+      "required": false
+    },
+    "WARN": {
+      "description": "how many times you want the bot should warn user before bot tke action",
+      "value": "5",
+      "required": false
+    },
+     "CONSOLE": {
+      "description": "turn on to let it display incoming message on console",
+      "value": "true",
+      "required": false
+    },
+    "HEROKU_APP_NAME": {
+      "description": "input the same field you added in your heroku name above",
+      "value": "",
+      "required": true
+    },
+    "HEROKU_API_KEY": {
+      "description": "generate a heroku api key to set your var after deployment go to settings then you would see an api key click on generate then copy and paste",
+      "value": "",
+      "required": true
+    },
+    "SYMBOL": {
+      "description": "This will show as the bot symbol before the menu",
+      "value": "🔶",
+      "required": false
+    }
+    ,
+    "ANTIDELETE": {
+      "description": "Enable antidelete when no panel DB setting is present. Accepts 1, true, yes (case-insensitive).",
+      "value": "",
+      "required": false
+    }
+  },
+"buildpacks": [
+      {
+        "url": "heroku/nodejs"
+    },
+    {
+      "url": "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest"
+    },
+    {
+      "url": "https://github.com/clhuang/heroku-buildpack-webp-binaries.git"
+          }
+     ]
+}
