@@ -1,0 +1,67 @@
+module.exports = [
+  {
+    command: ["toaudio"],
+    alias: ["tomp3","toaud"],
+    description: "Convert sound to audio",
+    category: "Converter",
+    ban: true,
+    gcban: true,
+    execute: async (m, { ednut, quoted, mime, toAudio, reply }) => {
+      if (!quoted) return reply("Reply to a video or audio");
+      if (!/video/.test(mime) && !/audio/.test(mime)) return reply("Reply to a video or audio");
+      let media = await quoted.download();
+      let audio = await toAudio(media, 'mp4');
+      await ednut.sendMessage(m.chat, { audio: audio, mimetype: 'audio/mpeg' }, { quoted: m });
+    }
+  },
+  {
+    command: ["tovn"],
+    alias: ["voicenote","toptt"],
+    description: "Convert sound to voice note",
+    category: "Converter",
+    ban: true,
+    gcban: true,
+    execute: async (m, { ednut, quoted, mime, toPTT, reply }) => {
+      if (!quoted) return reply("Reply to a video or audio");
+      if (!/video/.test(mime) && !/audio/.test(mime)) return reply("Reply to a video or audio");
+      let media = await quoted.download();
+      let audio = await toPTT(media, 'mp4');
+      await ednut.sendMessage(m.chat, { audio: audio, mimetype: 'audio/mpeg', ptt: true }, { quoted: m });
+    }
+  },
+  {
+  command: ["bass", "blown", "deep", "earrape", "fast", "fat", "nightcore", "reverse", "robot", "slow", "smooth", "squirrel"],
+  description: "Apply audio effects",
+  category: "Converter",
+  ban: true,
+  gcban: true,
+  execute: async (m, { ednut, quoted, mime, command, getRandom, fs, exec, reply }) => {
+    if (!quoted) return reply("Reply to an audio");
+    if (!/audio/.test(mime)) return reply("Reply to an audio");
+
+    let set;
+    if (/bass/.test(command)) set = '-af equalizer=f=54:width_type=o:width=2:g=20';
+    if (/blown/.test(command)) set = '-af acrusher=.1:1:64:0:log';
+    if (/deep/.test(command)) set = '-af atempo=4/4,asetrate=44500*2/3';
+    if (/earrape/.test(command)) set = '-af volume=12';
+    if (/fast/.test(command)) set = '-filter:a "atempo=1.63,asetrate=44100"';
+    if (/fat/.test(command)) set = '-filter:a "atempo=1.6,asetrate=22100"';
+    if (/nightcore/.test(command)) set = '-filter:a atempo=1.06,asetrate=44100*1.25';
+    if (/reverse/.test(command)) set = '-filter_complex "areverse"';
+    if (/robot/.test(command)) set = '-filter_complex "afftfilt=real=\'hypot(re,im)*sin(0)\':imag=\'hypot(re,im)*cos(0)\':win_size=512:overlap=0.75"';
+    if (/slow/.test(command)) set = '-filter:a "atempo=0.7,asetrate=44100"';
+    if (/smooth/.test(command)) set = '-filter:v "minterpolate=\'mi_mode=mci:mc_mode=aobmc:vsbmc=1:fps=120\'"';
+    if (/squirrel/.test(command)) set = '-filter:a "atempo=0.5,asetrate=65100"';
+
+    let media = await ednut.downloadAndSaveMediaMessage(quoted);
+    let ran = getRandom('.mp3');
+    exec(`ffmpeg -i ${media} ${set} ${ran}`, (err, stderr, stdout) => {
+      fs.unlinkSync(media);
+      if (err) return reply(err);
+      let buff = fs.readFileSync(ran);
+      ednut.sendMessage(m.chat, { audio: buff, mimetype: 'audio/mpeg' }, { quoted: m });
+      fs.unlinkSync(ran);
+    });
+  }
+  }
+]
