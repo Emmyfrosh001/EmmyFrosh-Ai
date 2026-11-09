@@ -91,9 +91,10 @@ module.exports = {
         return reply(updateCard);
       }
 
-      // shouldApply === true: download, extract, copy, restart.
+      // shouldApply === true: skip the "Update Available" card (they
+      // already know — that's why they typed "now") and go straight
+      // into download, extract, copy, restart.
       await clearReaction();
-      await reply(updateCard);
 
       // Set zip and temp paths to one directory up (project root)
       const projectRoot = path.resolve(__dirname, '..', '..');
