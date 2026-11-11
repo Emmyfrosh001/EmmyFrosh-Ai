@@ -92,20 +92,6 @@ function getPlatform() {
   }
 }
 
-// message ping in ms (messageTimestamp can be a number, string or Long object)
-function getPing(m) {
-  try {
-    let ts = m.messageTimestamp;
-    if (ts && typeof ts.toNumber === "function") ts = ts.toNumber();
-    ts = Number(ts);
-    if (!ts) return 0;
-    const ping = Date.now() - ts * 1000;
-    return ping < 0 ? 0 : ping;
-  } catch (e) {
-    return 0;
-  }
-}
-
 // ================= FONT LIST =================
 const FONT_LIST = [
   // 01
@@ -556,7 +542,7 @@ const getTime = () => moment.tz(global.timezone).format("HH:mm:ss");
 
 const ALL_CATEGORIES = [
   "EnvManager","Info","Fun","Ai","Group","Owner","Other","Logo",
-  "Search","Converter","Maker","Game","Tool","Downloader","Sport","Wa","External","Nsfw","Settings","Privacy"
+  "Search","Converter","Maker","Game","Economy","Tool","Downloader","Sport","Wa","External","Nsfw","Settings","Privacy"
 ];
 const CATEGORY_SET = new Set(ALL_CATEGORIES.map(c => c.toLowerCase()));
 
@@ -565,7 +551,7 @@ const CATEGORY_SET = new Set(ALL_CATEGORIES.map(c => c.toLowerCase()));
 // .delstyle   → go back to the default menu design
 //
 // Placeholders used in the saved template:
-// {BOTNAME} {USER} {PING} {TIME} {DATE} {COMMANDS} {MEMORY} {UPTIME}
+// {BOTNAME} {USER} {TIME} {DATE} {COMMANDS} {MEMORY} {UPTIME}
 // {VERSION} {PREFIX} {PLATFORM} {OWNER}  and  {CAT} (category title)
 
 const ALNUM     = "\\p{L}\\p{N}\\p{M}";
@@ -850,7 +836,6 @@ function makeValues(m, count, F, pfx) {
   return {
     BOTNAME:  F(global.botname || "EMMYFROSH-AI"),
     USER:     m.pushName || "User",
-    PING:     `${getPing(m)} ms`,
     TIME:     getTime(),
     DATE:     moment.tz(global.timezone).format("DD/MM/YYYY"),
     COMMANDS: String(count),
@@ -869,7 +854,7 @@ function renderStyledMenu(style, { F, pfx, vals, cats }) {
   const styleText = s => s.replace(/\{[A-Z]+\}|[A-Za-z]+/g, w => (w[0] === "{" ? w : F(w)));
   const fill = (s, extra = {}) => s.replace(/\{([A-Z]+)\}/g, (w, k) => (k in extra ? extra[k] : (k in vals ? vals[k] : w)));
 
-  const header = (style.header || []).map(l => fill(styleText(l))).join("\n");
+  const header = (style.header || []).filter(l => !/\{PING\}/.test(l)).map(l => fill(styleText(l))).join("\n");
 
   const blocks = cats.map(([cat, cmds]) => {
     const out = (style.title || []).map(l => fill(styleText(l), { CAT: F(cat) }));
@@ -976,8 +961,8 @@ module.exports = [
       } else {
         // Default design  (Platform is now the LAST line, after Version)
         menu = `┏━━━{ *${F(global.botname || "EMMYFROSH-AI")}* }━━━┓
+    ❃ ➤ ${F("Owner")}: ${getOwnerName()}
     ❃ ➤ ${F("User")}: ${m.pushName || "User"}
-    ❃ ➤ ${F("Ping")}: ${getPing(m)} ms
     ❃ ➤ ${F("Time")}: ${getTime()}
     ❃ ➤ ${F("Date")}: ${welDate}
     ❃ ➤ ${F("Commands")}: ${totalEnabledCommands}
