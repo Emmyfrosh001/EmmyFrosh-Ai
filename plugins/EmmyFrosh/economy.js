@@ -5,6 +5,12 @@
 
 const { SaveDataBase } = require('../../lib/Emmyfrosh');
 
+// Mongo URL lives in lib/mongodb.js (MONGO_URLS list) — not in .env
+function mongoReady() {
+  try { return require('../../lib/mongodb').getMongoUrls().length > 0; }
+  catch { return false; }
+}
+
 // ================================================================
 // 🎨 UI FORMATTER
 // ================================================================
@@ -2032,16 +2038,14 @@ const rawCommands = [
 ];
 
 // ================================================================
-// 🔐 MONGO GATE  (+ market upkeep runs before every command)
+// 🔐 MONGO GATE (reads lib/mongodb.js) + market upkeep before every command
 // ================================================================
 module.exports = rawCommands.map(cmd => {
   const orig = cmd.execute;
   cmd.execute = async (m, ctx) => {
-    const bypass = ['gencoupon','redeemcoupon','aviator','sporty']
-      .some(c => cmd.command.includes(c));
-    if (!bypass && (!process.env.MONGO_URI || !process.env.MONGO_URI.trim()))
+    if (!mongoReady())
       return ctx.reply(UI('🚨 SYSTEM LOCK',
-        'Economy is locked. Set MONGO_URI in your .env file first.'));
+        'Economy is locked. Add a Mongo URL in the MONGO_URLS list in lib/mongodb.js first.'));
     rememberName(m);
     try { if (economyTick()) await SaveDataBase(); } catch {}
     try { return await orig(m, ctx); }
