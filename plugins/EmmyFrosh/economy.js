@@ -16,6 +16,14 @@ function mongoReady() {
 // ================================================================
 const UI = (title, text = "") => `╭─❏〘 ${title} 〙━❒\n\n${text}\n\n╰───────────╯`;
 
+// ʟᴏᴡᴇʀᴄᴀꜱᴇ → ꜱᴍᴀʟʟ ᴄᴀᴘꜱ (digits, symbols and emojis are left alone)
+const SMALL_CAPS = {
+  a:'ᴀ', b:'ʙ', c:'ᴄ', d:'ᴅ', e:'ᴇ', f:'ꜰ', g:'ɢ', h:'ʜ', i:'ɪ', j:'ᴊ', k:'ᴋ', l:'ʟ', m:'ᴍ',
+  n:'ɴ', o:'ᴏ', p:'ᴘ', q:'ǫ', r:'ʀ', s:'ꜱ', t:'ᴛ', u:'ᴜ', v:'ᴠ', w:'ᴡ', x:'x', y:'ʏ', z:'ᴢ'
+};
+const sc = (s) => String(s).toLowerCase().replace(/[a-z]/g, ch => SMALL_CAPS[ch]);
+
+
 // ================================================================
 // 🔐 COUPON SITE CONFIG
 // ================================================================
@@ -235,6 +243,27 @@ const isItem = (k) => !!(SHOP[k] || COINS[k]);
 const nameOf = (k) => (SHOP[k] || COINS[k])?.name || k;
 
 // ================================================================
+// 🆕 CUSTOM GOODS & COINS (made by admins, saved in the database)
+//   global.db.economy.customShop  = { key: { name, buy } }
+//   global.db.economy.customCoins = { key: { name, rate } }
+//   global.db.economy.priceOverride = { key: price }   (built-ins too)
+// They are merged into SHOP / COINS, so the shop, market, sell, rates,
+// the website and the website admin all see them automatically.
+// ================================================================
+function applyCustom() {
+  if (!global.db) return;
+  const e = eco();
+  for (const [k, v] of Object.entries(e.customShop))  SHOP[k]  = { name: v.name, buy: v.buy,  custom: true };
+  for (const [k, v] of Object.entries(e.customCoins)) COINS[k] = { name: v.name, rate: v.rate, custom: true };
+  for (const k of Object.keys(SHOP))  if (SHOP[k].custom  && !e.customShop[k])  delete SHOP[k];
+  for (const k of Object.keys(COINS)) if (COINS[k].custom && !e.customCoins[k]) delete COINS[k];
+  for (const [k, p] of Object.entries(e.priceOverride)) {
+    if (SHOP[k]) SHOP[k].buy = p;
+    else if (COINS[k]) COINS[k].rate = p;
+  }
+}
+
+// ================================================================
 // 💹 ITEM VALUE APPRECIATION
 // Items quietly gain a small bonus for every 24h you hold them
 // (~0.025% of the shop price per day). The bonus is added on top
@@ -380,6 +409,9 @@ function eco() {
   if (!e.restock)   e.restock   = [];
   if (!e.lastTick)  e.lastTick  = 0;
   if (!e.lastCoin)  e.lastCoin  = 0;
+  if (!e.customShop)     e.customShop     = {};
+  if (!e.customCoins)    e.customCoins    = {};
+  if (!e.priceOverride)  e.priceOverride  = {};
   return e;
 }
 
@@ -473,6 +505,7 @@ function ensureStock() {
 function economyTick() {
   if (!global.db) return false;
   const e   = eco();
+  applyCustom();                       // admin-made goods/coins + price overrides
   const m   = global.db.market;
   const now = Date.now();
   let changed = false;
@@ -616,6 +649,22 @@ function senderNumber(m) {
   return pn ? idDigits(pn) : '';
 }
 
+// same as senderNumber, but if the sender only shows as an @lid it asks
+// WhatsApp's LID→number map (newer Baileys). Returns '' when it can't tell.
+async function senderNumberAsync(m, ednut) {
+  const n = senderNumber(m);
+  if (n) return n;
+  try {
+    const lid = [m.sender, m.key?.participant, m.key?.remoteJid].filter(Boolean).find(j => /@lid$/.test(String(j)));
+    const map = ednut?.signalRepository?.lidMapping;
+    if (lid && map?.getPNForLID) {
+      const pn = await map.getPNForLID(lid);
+      if (pn) return idDigits(pn);
+    }
+  } catch {}
+  return '';
+}
+
 // ── apply one website purchase (shop or market) ──────────────────
 function siteBuy(jid, j) {
   const u   = getUser(jid);
@@ -704,6 +753,58 @@ function siteMarketJob(j) {
   return { ok: false, error: 'bad_job' };
 }
 
+// ── admin goods & coins (made on the website admin panel) ────────
+function siteItemJob(j) {
+  const e = eco();
+  const k = String(j.key || j.item || '').toLowerCase();
+
+  if (j.type === 'item_add') {
+    const isCoin = j.kind === 'coin';
+    const price  = Math.floor(Number(j.price));
+    const label  = String(j.name || '').trim().slice(0, 40);
+    if (!/^[a-z0-9_]{2,24}$/.test(k)) return { ok: false, error: 'bad_id' };
+    if (!(price >= 1 && price <= 1e15)) return { ok: false, error: 'bad_price' };
+    if (isCoin ? !!SHOP[k] : !!COINS[k]) return { ok: false, error: 'id_taken' };
+    if (isCoin ? (COINS[k] && !COINS[k].custom) : (SHOP[k] && !SHOP[k].custom)) return { ok: false, error: 'id_builtin' };
+    const existed = isCoin ? !!e.customCoins[k] : !!e.customShop[k];
+    if (isCoin) { e.customCoins[k] = { name: label || k.toUpperCase(), rate: price }; e.coinRates[k] = price; }
+    else        { e.customShop[k]  = { name: label || (k.charAt(0).toUpperCase() + k.slice(1)), buy: price }; }
+    delete e.priceOverride[k];
+    applyCustom();
+    if (!existed) { spawnBot(k); spawnBot(k); }      // a couple of market sellers right away
+    return { ok: true, msg: `${existed ? 'Updated' : 'Created'} ${nameOf(k)} at $${fmt(price)}` };
+  }
+
+  if (j.type === 'item_price') {
+    const price = Math.floor(Number(j.price));
+    if (!isItem(k)) return { ok: false, error: 'bad_item' };
+    if (!(price >= 1 && price <= 1e15)) return { ok: false, error: 'bad_price' };
+    if (SHOP[k]?.custom)       e.customShop[k].buy = price;
+    else if (COINS[k]?.custom) e.customCoins[k].rate = price;
+    else                       e.priceOverride[k] = price;
+    if (COINS[k]) e.coinRates[k] = price;
+    applyCustom();
+    repriceBot(k);
+    return { ok: true, msg: `${nameOf(k)} is now $${fmt(price)}` };
+  }
+
+  if (j.type === 'item_del') {
+    if (!e.customShop[k] && !e.customCoins[k]) return { ok: false, error: 'not_custom' };
+    const label = nameOf(k);
+    for (const [id, l] of Object.entries(global.db.market)) if (l.item === k) delete global.db.market[id];
+    e.restock = e.restock.filter(r => r.item !== k);
+    for (const u of Object.values(global.db.users || {})) {
+      if (u?.inventory?.[k]) delete u.inventory[k];
+      if (u?.itemValue?.[k]) delete u.itemValue[k];
+    }
+    delete e.customShop[k]; delete e.customCoins[k];
+    delete e.priceOverride[k]; delete e.coinRates[k]; delete e.hidden[k];
+    applyCustom();
+    return { ok: true, msg: `Removed ${label}` };
+  }
+  return { ok: false, error: 'bad_job' };
+}
+
 // ── admin account changes (password / ban / delete login) ────────
 function siteAcctJob(j) {
   const u = global.db.users[j.user];
@@ -720,8 +821,8 @@ function siteAcctJob(j) {
 
 function marketSnapshot() {
   const now = Date.now();
-  const shop = Object.keys(SHOP).map(k => ({ key: k, name: SHOP[k].name, price: SHOP[k].buy, out: isHidden(k) }));
-  const coins = Object.keys(COINS).map(k => ({ key: k, name: COINS[k].name, price: coinRate(k) }));
+  const shop = Object.keys(SHOP).map(k => ({ key: k, name: SHOP[k].name, price: SHOP[k].buy, out: isHidden(k), custom: !!SHOP[k].custom }));
+  const coins = Object.keys(COINS).map(k => ({ key: k, name: COINS[k].name, price: coinRate(k), custom: !!COINS[k].custom }));
   const listings = Object.values(global.db.market || {}).map(l => ({
     id: String(l.id), item: l.item, name: nameOf(l.item), qty: l.qty, price: l.price,
     seller: l.sellerName || 'Seller', kind: l.admin ? 'admin' : (l.bot ? 'bot' : 'player'),
@@ -743,6 +844,7 @@ async function siteSync() {
   if (siteBusy || !global.db?.users) return;
   if (!COUPON_API_URL || !COUPON_API_KEY) return;
   siteBusy = true;
+  try { applyCustom(); } catch {}
   try {
     // 1) apply jobs from the website
     const p = await couponApi('/api/pending', {});
@@ -774,6 +876,8 @@ async function siteSync() {
             r = global.db.users[j.user] ? siteBuy(j.user, j) : { ok: false, error: 'player_not_found' };
           } else if (String(j.type).startsWith('m_')) {
             r = siteMarketJob(j);
+          } else if (String(j.type).startsWith('item_')) {
+            r = siteItemJob(j);
           } else if (String(j.type).startsWith('acct_')) {
             r = siteAcctJob(j);
           } else r = { ok: false, error: 'bad_job' };
@@ -2053,16 +2157,17 @@ const rawCommands = [
       const inGroup = m.isGroup || String(m.chat).endsWith('@g.us');
       if (inGroup) {
         try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {}
-        return reply(UI('🔑 SITE PASSWORD', `⚠️ Never send your password in a group.\n\nOpen a private chat with me and send:\n.setpass <your password>\n\nIf you typed a real password here, it was not saved — and you should use a different one.`));
+        return reply(UI('🔑 SITE PASSWORD', `⚠️ Never send your password in a group. .setpass only works in a private chat (DM) with me.\n\nOpen a private chat with me and send:\n.setpass <your password>\n\nOr skip WhatsApp: create your account on the website:\n🌐 ${COUPON_API_URL}/shop\n\nIf you typed a real password here, it was not saved — and you should use a different one.`));
       }
-      let number = senderNumber(m);
-      let pw;
-      if (number) pw = args[0];
-      else if (/^\+?\d{10,15}$/.test(args[0] || '')) { number = args[0].replace(/\D/g, ''); pw = args[1]; }
-      else return reply(UI('🔑 SITE PASSWORD', `I could not read your phone number.\n\nSend it with your password:\n.setpass <your number> <password>\n\nExample:\n.setpass 2348012345678 mypass123`));
+      // 🔒 the number ALWAYS comes from the WhatsApp account that sent the message.
+      // (typing someone else's number is no longer accepted)
+      const number = await senderNumberAsync(m, ednut);
+      const pw = args[0];
+      if (!number)
+        return reply(UI('🔑 SITE PASSWORD', `❌ I could not read your WhatsApp number, so I cannot link a password to it.\n\nTry again from your normal WhatsApp account.`));
 
       if (!pw)
-        return reply(UI('🔑 SITE PASSWORD', `Choose a password to log in on the website.\n\n📌 Usage:\n.setpass <password>\n\n• 6 to 40 characters, no spaces\n• Login on the site: your number + this password\n• Send it again any time to change it`));
+        return reply(UI('🔑 SITE PASSWORD', `Choose a password to log in on the website.\n\n📌 Usage:\n.setpass <password>\n\n• 6 to 40 characters, no spaces\n• Login on the site: your number + this password\n• You can also create your account on the website:\n  ${COUPON_API_URL}/shop\n• Already set a password and forgot it? Chat with customer care on the website (no login needed — tap the round chat button): ${COUPON_API_URL}/shop`));
       if (pw.length < 6 || pw.length > 40)
         return reply(UI('🔑 SITE PASSWORD', `❌ Password must be 6 to 40 characters.`));
 
@@ -2073,6 +2178,13 @@ const rawCommands = [
 
       if (getUser(me).siteBanned) return reply(UI('🔑 SITE PASSWORD', `🚫 Your website account has been banned.`));
       const u = getUser(me);
+
+      // 🔒 a password already exists → it cannot be changed from the bot.
+      // Forgot it? Customer care resets it from the website admin panel.
+      if (u.sitePass) {
+        try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {}
+        return reply(UI('🔑 SITE PASSWORD', `🔒 You already have a password for the website, so I can't set a new one here.\n\nForgot it? Chat with customer care on the website — no login needed. Tap the round 💬 button and they will reset it for you:\n\n🌐 ${COUPON_API_URL}/shop`));
+      }
       u.siteNumber = key;
       u.sitePass   = await hashPass(pw);
       await SaveDataBase();
@@ -2093,7 +2205,7 @@ const rawCommands = [
     execute: async (m, { reply, args, ednut }) => {
       const inGroup = m.isGroup || String(m.chat).endsWith('@g.us');
       const del = async () => { try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {} };
-      if (inGroup) { await del(); return reply(UI('✅ VERIFY', `Please send .verify in a private chat with me, not in a group.`)); }
+      if (inGroup) { await del(); return reply(UI(`✅ ${sc('verify')}`, sc('please send .verify in a private chat with me, not in a group.'))); }
       const code = String(args.join('') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (code.length !== 8)
         return reply(UI('✅ VERIFY', `Create your account on the website first, then send the code it shows you:\n\n.verify ABCD-EFGH\n\n🌐 ${COUPON_API_URL}/shop`));
@@ -2104,15 +2216,28 @@ const rawCommands = [
       if (tries.length >= 6) return reply(UI('✅ VERIFY', `Too many tries. Wait a few minutes and try again.`));
       tries.push(now); verifyTries.set(m.sender, tries);
 
+      // 🔒 STRICT: the number that sends .verify must be the number that signed up.
+      // If the bot cannot tell which number sent the message, it refuses (never "lets it through").
       const me  = cleanJid(m.sender);
-      const num = senderNumber(m);
-      const res = await couponApi('/api/verify', { code, number: num ? last10(num) : '' });
+      const num = await senderNumberAsync(m, ednut);
+      if (!num) {
+        await del();
+        return reply(UI(`❌ ${sc('verify failed')}`, `${sc('i could not read your whatsapp number.')}\n\n${sc('send .verify from the same number you signed up with on the website.')}`));
+      }
+      const mismatch = async () => {
+        await del();
+        return reply(UI(`❌ ${sc('verify failed')}`, `${sc('this code belongs to a different whatsapp number.')}\n\n${sc('send .verify from the number you signed up with.')}`));
+      };
+      const res = await couponApi('/api/verify', { code, number: last10(num) });
       if (res.error === 'unreachable') return reply(UI('🔌 SITE OFFLINE', `Could not reach the website. Try again in a moment.`));
       if (res.error === 'invalid_code') return reply(UI('✅ VERIFY', `❌ That code is not valid.\n\nCheck it, or create the account again on the website to get a new code.`));
       if (res.error === 'code_expired') return reply(UI('✅ VERIFY', `⌛ That code has expired.\n\nCreate the account again on the website to get a new one.`));
-      if (res.error === 'number_mismatch') { await del(); return reply(UI('✅ VERIFY', `❌ This code was made for a different WhatsApp number.\n\nSend .verify from the number you signed up with.`)); }
+      if (res.error === 'number_mismatch') return mismatch();
       if (!res.ok || !res.number || !/^s1\$[0-9a-f]{32}\$[0-9a-f]{128}$/.test(String(res.hash || '')))
         return reply(UI('❌ ERROR', `Could not verify right now. Try again.`));
+
+      // double-check here too (so it stays strict even if the website is older)
+      if (last10(res.number) !== last10(num)) return mismatch();
 
       const key = last10(res.number);
       const taken = Object.entries(global.db.users || {}).find(([jid, x]) => jid !== me && x?.siteNumber === key);
@@ -2126,7 +2251,7 @@ const rawCommands = [
       verifyTries.delete(m.sender);
       siteLastMarket = 0;
       setTimeout(siteSync, 500);
-      return reply(UI('✅ ACCOUNT VERIFIED', `You can now log in on the website:\n\n📱 Number : ${key}\n🔒 Password: the one you chose when you signed up\n\n🌐 ${COUPON_API_URL}/shop\n\nLogin works in about 30 seconds.`));
+      return reply(UI(`✔️ ${sc('verified successfully')}`, `✔️ ${sc('your whatsapp number is now linked.')}\n\n📱 ${sc('number')}   : ${key}\n🔒 ${sc('password')} : ${sc('the one you chose when you signed up')}\n\n🌐 ${COUPON_API_URL}/shop\n\n${sc('you can now log in on the website. login works in about 30 seconds.')}`));
     }
   },
 
