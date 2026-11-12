@@ -651,15 +651,51 @@ function senderNumber(m) {
 
 // same as senderNumber, but if the sender only shows as an @lid it asks
 // WhatsApp's LID→number map (newer Baileys). Returns '' when it can't tell.
+// remembers "@lid → real number" pairs the bot has seen, so the same person is
+// recognised again later even if WhatsApp hides their number in a group
+function lidBook() { if (!global.db) return {}; return (global.db.lidMap = global.db.lidMap || {}); }
+const isLidJid = (j) => /@lid$/.test(String(j || ''));
+const isPnJid  = (j) => /@s\.whatsapp\.net$/.test(String(j || ''));
+function learnLid(lid, pn) {
+  try { const l = idDigits(lid), p = idDigits(pn); if (l && p.length >= 7) lidBook()[l] = p; } catch {}
+}
+
 async function senderNumberAsync(m, ednut) {
+  const ids = [m.sender, m.key?.participant, m.key?.participantAlt, m.key?.remoteJidAlt, m.participant].filter(Boolean).map(String);
+  const lids = ids.filter(isLidJid);
+
+  // 0) the number is right there in the message
   const n = senderNumber(m);
-  if (n) return n;
+  if (n) { lids.forEach(l => learnLid(l, n)); return n; }
+
+  // 1) seen this person before
+  for (const l of lids) { const hit = lidBook()[idDigits(l)]; if (hit) return hit; }
+
+  // 2) WhatsApp's own LID → phone-number map (newer Baileys)
   try {
-    const lid = [m.sender, m.key?.participant, m.key?.remoteJid].filter(Boolean).find(j => /@lid$/.test(String(j)));
-    const map = ednut?.signalRepository?.lidMapping;
-    if (lid && map?.getPNForLID) {
-      const pn = await map.getPNForLID(lid);
-      if (pn) return idDigits(pn);
+    const repo = ednut?.signalRepository;
+    const map  = repo?.lidMapping;
+    for (const lid of lids) {
+      let pn = null;
+      if (map?.getPNForLID) pn = await map.getPNForLID(lid) || await map.getPNForLID(lid.replace(/:\d+@/, '@'));
+      if (!pn && repo?.getPNForLID) pn = await repo.getPNForLID(lid);
+      if (pn) { learnLid(lid, pn); return idDigits(pn); }
+    }
+  } catch {}
+
+  // 3) group member list: the participant that matches the sender carries the real number
+  try {
+    if (String(m.chat).endsWith('@g.us') && ednut?.groupMetadata) {
+      const meta = await ednut.groupMetadata(m.chat);
+      let found = '';
+      const want = new Set(ids.map(cleanJid));
+      for (const p of (meta.participants || [])) {
+        const pn  = [p.phoneNumber, p.pn, p.jid, p.id].filter(Boolean).find(isPnJid);
+        const lid = [p.lid, p.id].filter(Boolean).find(isLidJid);
+        if (pn && lid) learnLid(lid, pn);                                    // remember everyone in the group
+        if (pn && [p.id, p.lid, p.jid, p.phoneNumber, p.pn].filter(Boolean).some(v => want.has(cleanJid(v)))) found = idDigits(pn);
+      }
+      if (found) return found;
     }
   } catch {}
   return '';
@@ -2195,6 +2231,21 @@ const rawCommands = [
     }
   },
 
+  // 🔎 WHOAMI — shows which WhatsApp number the bot reads for you (handy to test .verify)
+  {
+    command:     ['whoami'],
+    alias:       ['mynumber'],
+    category:    'economy',
+    description: 'Show the WhatsApp number the bot can read for you',
+    execute: async (m, { reply, ednut }) => {
+      const num = await senderNumberAsync(m, ednut);
+      const raw = [m.sender, m.key?.participant].filter(Boolean).map(j => String(j).replace(/:\d+@/, '@')).join(' | ');
+      return reply(UI(`🔎 ${sc('who am i')}`, num
+        ? `✔️ ${sc('i can read your number:')} ${num}\n\n${sc('.verify will work for you here.')}`
+        : `❌ ${sc('i cannot read your number in this chat.')}\n\n${sc('send .verify in a private chat with the bot instead.')}\n\n(${raw || 'no id'})`));
+    }
+  },
+
   // ✅ VERIFY — finish an account created on the website
   //   .verify <CODE>    (private chat only)
   {
@@ -2205,7 +2256,9 @@ const rawCommands = [
     execute: async (m, { reply, args, ednut }) => {
       const inGroup = m.isGroup || String(m.chat).endsWith('@g.us');
       const del = async () => { try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {} };
-      if (inGroup) { await del(); return reply(UI(`✅ ${sc('verify')}`, sc('please send .verify in a private chat with me, not in a group.'))); }
+      // ✅ works in a group too: the code only works from the number that signed up,
+      // so nobody else can use it. In a group the message with the code is deleted straight away.
+      if (inGroup) await del();
       const code = String(args.join('') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (code.length !== 8)
         return reply(UI('✅ VERIFY', `Create your account on the website first, then send the code it shows you:\n\n.verify ABCD-EFGH\n\n🌐 ${COUPON_API_URL}/shop`));
@@ -2251,7 +2304,7 @@ const rawCommands = [
       verifyTries.delete(m.sender);
       siteLastMarket = 0;
       setTimeout(siteSync, 500);
-      return reply(UI(`✔️ ${sc('verified successfully')}`, `✔️ ${sc('your whatsapp number is now linked.')}\n\n📱 ${sc('number')}   : ${key}\n🔒 ${sc('password')} : ${sc('the one you chose when you signed up')}\n\n🌐 ${COUPON_API_URL}/shop\n\n${sc('you can now log in on the website. login works in about 30 seconds.')}`));
+      return reply(UI(`✔️ ${sc('verified successfully')}`, `✔️ ${sc('your whatsapp number is now linked.')}\n\n📱 ${sc('number')}   : ${inGroup ? key.slice(0, 3) + '••••' + key.slice(-3) : key}\n🔒 ${sc('password')} : ${sc('the one you chose when you signed up')}\n\n🌐 ${COUPON_API_URL}/shop\n\n${sc('you can now log in on the website. login works in about 30 seconds.')}`));
     }
   },
 
