@@ -492,7 +492,7 @@ function economyTick() {
   for (const [id, l] of Object.entries(m)) {
     if (!l.id)   { l.id = id; changed = true; }
     if (!l.unit) { l.price = Math.max(1, Math.ceil(l.price / Math.max(1, l.qty))); l.unit = true; changed = true; }
-    if (!l.bot && !l.expiresAt) { l.expiresAt = (l.createdAt || now) + DAY; changed = true; }
+    if (!l.bot && !l.admin && !l.expiresAt) { l.expiresAt = (l.createdAt || now) + DAY; changed = true; }
   }
   // old databases already have a full market → don't re-seed it
   if (!e.seeded && botCount() > 0) { e.seeded = true; changed = true; }
@@ -585,49 +585,224 @@ try {
 } catch {}
 
 // ================================================================
-// 🌐 COUPON SITE SYNC
-// • every 30s: pick up money edits made by the admin on the site and apply them
-// • every 5 min (and right after an edit): send the standings to the site
-// Needs COUPON_API_URL + COUPON_API_KEY in .env (same ones used for coupons).
+// 🌐 SITE SYNC
+// • every 10s: pick up jobs from the site (admin money edits, admin market
+//   changes, and purchases made by players on the website) and apply them
+// • every 30s: send the market, the shop and the website accounts' balances
+// • every 5 min (and right after an edit): send the standings
 // ================================================================
+const crypto = require('crypto');
 let siteBusy = false;
 let siteLastPush = 0;
+let siteLastMarket = 0;
+const verifyTries = new Map();
+let siteWatch = [];          // jids that have a site account (balances are sent for these)
+
+const last10 = (s) => String(s || '').replace(/\D/g, '').slice(-10);
+
+function hashPass(pw) {
+  return new Promise((resolve, reject) => {
+    const salt = crypto.randomBytes(16).toString('hex');
+    crypto.scrypt(String(pw), salt, 64, (err, key) => err ? reject(err) : resolve(`s1$${salt}$${key.toString('hex')}`));
+  });
+}
+
+// the real phone number of whoever sent the message (works even with @lid ids)
+function senderNumber(m) {
+  const cands = [m.sender, m.key?.participant, m.key?.participantPn, m.key?.remoteJidAlt,
+                 m.key?.participantAlt, m.participantPn, m.senderPn, m.key?.remoteJid]
+    .filter(Boolean).map(String);
+  const pn = cands.find(j => /@s\.whatsapp\.net$/.test(j));
+  return pn ? idDigits(pn) : '';
+}
+
+// ── apply one website purchase (shop or market) ──────────────────
+function siteBuy(jid, j) {
+  const u   = getUser(jid);
+  if (u.siteBanned) return { ok: false, error: 'banned' };
+  const now = Date.now();
+  const qty = Math.floor(Number(j.qty));
+  if (!Number.isFinite(qty) || qty < 1 || qty > 1e6) return { ok: false, error: 'bad_qty' };
+
+  if (j.kind === 'market') {
+    const market = global.db.market || {};
+    const id = String(j.ref);
+    const l  = market[id];
+    if (!l) return { ok: false, error: 'no_listing' };
+    if (l.seller === jid) return { ok: false, error: 'own_listing' };
+    if (l.closedUntil && l.closedUntil > now) return { ok: false, error: 'closed' };
+    if (qty > l.qty) return { ok: false, error: 'not_enough_stock', left: l.qty };
+    const cost = l.price * qty;
+    if (u.balance < cost) return { ok: false, error: 'insufficient', need: cost, balance: u.balance };
+    u.balance -= cost; u.wallet = u.balance;
+    if (!l.bot && !l.admin) { const sl = getUser(l.seller); sl.balance += cost; sl.wallet = sl.balance; }
+    u.inventory[l.item] = (u.inventory[l.item] || 0) + qty;
+    tickItemValue(u, l.item);
+    addExp(u, Math.min(500, 40 * qty));
+    l.qty -= qty;
+    if (l.qty <= 0) { delete market[id]; if (l.bot) scheduleRestock(l); }
+    return { ok: true, msg: `Bought ${fmt(qty)} × ${nameOf(l.item)} for $${fmt(cost)}`, balance: u.balance };
+  }
+
+  if (j.kind === 'shop') {
+    const k = String(j.ref || '').toLowerCase();
+    if (!SHOP[k]) return { ok: false, error: 'bad_item' };
+    if (isHidden(k)) return { ok: false, error: 'out_of_stock' };
+    const cost = SHOP[k].buy * qty;
+    if (u.balance < cost) return { ok: false, error: 'insufficient', need: cost, balance: u.balance };
+    u.balance -= cost; u.wallet = u.balance;
+    u.inventory[k] = (u.inventory[k] || 0) + qty;
+    tickItemValue(u, k);
+    addExp(u, Math.min(500, 40 * qty));
+    return { ok: true, msg: `Bought ${fmt(qty)} × ${SHOP[k].name} for $${fmt(cost)}`, balance: u.balance };
+  }
+  return { ok: false, error: 'bad_kind' };
+}
+
+// ── apply one admin market change ────────────────────────────────
+function siteMarketJob(j) {
+  const market = global.db.market || (global.db.market = {});
+  const now = Date.now();
+  if (j.type === 'm_add') {
+    const item  = String(j.item || '').toLowerCase();
+    const qty   = Math.floor(Number(j.qty));
+    const price = Math.floor(Number(j.price));
+    if (!isItem(item)) return { ok: false, error: 'bad_item' };
+    if (!(qty >= 1 && qty <= 1e9) || !(price >= 1 && price <= 1e15)) return { ok: false, error: 'bad_amount' };
+    const id = genId();
+    market[id] = {
+      id, seller: 'admin', sellerName: String(j.sellerName || 'Official Store').slice(0, 30),
+      bot: false, admin: true, item, qty, price, unit: true, createdAt: now, closedUntil: 0
+    };
+    return { ok: true, msg: `Listed ${fmt(qty)} × ${nameOf(item)} as #${id}` };
+  }
+  const l = market[String(j.ref)];
+  if (!l) return { ok: false, error: 'no_listing' };
+  if (j.type === 'm_remove') {
+    if (!l.bot && !l.admin && l.seller) { const su = getUser(l.seller); su.inventory[l.item] = (su.inventory[l.item] || 0) + l.qty; }
+    delete market[String(j.ref)];
+    return { ok: true };
+  }
+  if (j.type === 'm_close') {
+    const mins = Math.floor(Number(j.minutes));
+    l.closedUntil = mins > 0 ? now + Math.min(mins, 60 * 24 * 365) * 60000 : now + 10 * 365 * 86400000;
+    return { ok: true };
+  }
+  if (j.type === 'm_open')  { l.closedUntil = 0; return { ok: true }; }
+  if (j.type === 'm_topup') {
+    const qty = Math.floor(Number(j.qty));
+    if (!(qty >= 1 && qty <= 1e9)) return { ok: false, error: 'bad_amount' };
+    l.qty += qty;
+    return { ok: true };
+  }
+  if (j.type === 'm_price') {
+    const price = Math.floor(Number(j.price));
+    if (!(price >= 1 && price <= 1e15)) return { ok: false, error: 'bad_amount' };
+    l.price = price;
+    return { ok: true };
+  }
+  return { ok: false, error: 'bad_job' };
+}
+
+// ── admin account changes (password / ban / delete login) ────────
+function siteAcctJob(j) {
+  const u = global.db.users[j.user];
+  if (!u || !u.siteNumber) return { ok: false, error: 'account_not_found' };
+  if (j.type === 'acct_pass') {
+    if (!/^s1\$[0-9a-f]{32}\$[0-9a-f]{128}$/.test(String(j.hash || ''))) return { ok: false, error: 'bad_hash' };
+    u.sitePass = j.hash;
+    return { ok: true };
+  }
+  if (j.type === 'acct_ban') { u.siteBanned = !!j.banned; return { ok: true }; }
+  if (j.type === 'acct_del') { delete u.sitePass; delete u.siteNumber; delete u.siteBanned; return { ok: true }; }
+  return { ok: false, error: 'bad_job' };
+}
+
+function marketSnapshot() {
+  const now = Date.now();
+  const shop = Object.keys(SHOP).map(k => ({ key: k, name: SHOP[k].name, price: SHOP[k].buy, out: isHidden(k) }));
+  const coins = Object.keys(COINS).map(k => ({ key: k, name: COINS[k].name, price: coinRate(k) }));
+  const listings = Object.values(global.db.market || {}).map(l => ({
+    id: String(l.id), item: l.item, name: nameOf(l.item), qty: l.qty, price: l.price,
+    seller: l.sellerName || 'Seller', kind: l.admin ? 'admin' : (l.bot ? 'bot' : 'player'),
+    seller_id: (!l.bot && !l.admin) ? l.seller : '',
+    closedUntil: l.closedUntil && l.closedUntil > now ? l.closedUntil : 0,
+    expiresAt: l.expiresAt || 0
+  }));
+  const accounts = [], balances = {};
+  for (const [jid, u] of Object.entries(global.db.users || {})) {
+    if (!u || !u.sitePass || !u.siteNumber) continue;
+    accounts.push({ number: u.siteNumber, jid, hash: u.sitePass, banned: !!u.siteBanned, name: nameFor(jid) || 'Player' });
+    balances[jid] = { balance: u.balance || 0, bank: u.bank || 0, level: u.level || 1, name: nameFor(jid) || 'Player' };
+  }
+  siteWatch = accounts.map(a => a.jid);
+  return { shop, coins, listings, accounts, balances };
+}
 
 async function siteSync() {
   if (siteBusy || !global.db?.users) return;
   if (!COUPON_API_URL || !COUPON_API_KEY) return;
   siteBusy = true;
   try {
-    // 1) apply edits from the admin dashboard
+    // 1) apply jobs from the website
     const p = await couponApi('/api/pending', {});
     if (p.ok && Array.isArray(p.jobs) && p.jobs.length) {
       if (!Array.isArray(global.db.appliedAdj)) global.db.appliedAdj = [];
+      if (!global.db.appliedRes) global.db.appliedRes = {};
       const results = [];
       for (const j of p.jobs) {
-        // already applied before (ack got lost)? don't apply twice
-        if (global.db.appliedAdj.includes(j.id)) { results.push({ id: j.id, ok: true }); continue; }
-        if (!global.db.users[j.user]) { results.push({ id: j.id, ok: false, error: 'player_not_found' }); continue; }
-        const amt = Math.floor(Number(j.amount));
-        const f   = ['balance', 'bank', 'gams'].includes(j.field) ? j.field : null;
-        if (!f || !Number.isFinite(amt) || amt < 0 || !['add', 'remove', 'set'].includes(j.op)) {
-          results.push({ id: j.id, ok: false, error: 'bad_edit' });
-          continue;
+        // already applied before (ack got lost)? don't apply twice — resend same result
+        if (global.db.appliedAdj.includes(j.id)) { results.push(Object.assign({ id: j.id, ok: true }, global.db.appliedRes[j.id] || {})); continue; }
+        let r;
+        try {
+          if (!j.type || j.type === 'adjust') {
+            if (!global.db.users[j.user]) { r = { ok: false, error: 'player_not_found' }; }
+            else {
+              const amt = Math.floor(Number(j.amount));
+              const f   = ['balance', 'bank', 'gams'].includes(j.field) ? j.field : null;
+              if (!f || !Number.isFinite(amt) || amt < 0 || !['add', 'remove', 'set'].includes(j.op)) r = { ok: false, error: 'bad_edit' };
+              else {
+                const u = getUser(j.user);
+                if (j.op === 'add')         u[f] = (u[f] || 0) + amt;
+                else if (j.op === 'remove') u[f] = Math.max(0, (u[f] || 0) - amt);
+                else                        u[f] = amt;
+                if (f === 'balance') u.wallet = u.balance;
+                r = { ok: true };
+              }
+            }
+          } else if (j.type === 'buy') {
+            r = global.db.users[j.user] ? siteBuy(j.user, j) : { ok: false, error: 'player_not_found' };
+          } else if (String(j.type).startsWith('m_')) {
+            r = siteMarketJob(j);
+          } else if (String(j.type).startsWith('acct_')) {
+            r = siteAcctJob(j);
+          } else r = { ok: false, error: 'bad_job' };
+        } catch (e) { r = { ok: false, error: 'bot_error' }; }
+
+        if (r.ok) {
+          global.db.appliedAdj.push(j.id);
+          global.db.appliedRes[j.id] = { msg: r.msg, balance: r.balance };
         }
-        const u = getUser(j.user);
-        if (j.op === 'add')         u[f] = (u[f] || 0) + amt;
-        else if (j.op === 'remove') u[f] = Math.max(0, (u[f] || 0) - amt);
-        else                        u[f] = amt;
-        if (f === 'balance') u.wallet = u.balance;
-        global.db.appliedAdj.push(j.id);
-        results.push({ id: j.id, ok: true });
+        results.push(Object.assign({ id: j.id }, r));
       }
-      if (global.db.appliedAdj.length > 500) global.db.appliedAdj = global.db.appliedAdj.slice(-500);
+      if (global.db.appliedAdj.length > 500) {
+        global.db.appliedAdj = global.db.appliedAdj.slice(-500);
+        const keep = new Set(global.db.appliedAdj);
+        for (const k of Object.keys(global.db.appliedRes)) if (!keep.has(k)) delete global.db.appliedRes[k];
+      }
       await SaveDataBase();
       await couponApi('/api/ack', { results });
-      siteLastPush = 0;   // send fresh standings right away
+      siteLastPush = 0;      // fresh standings right away
+      siteLastMarket = 0;    // and a fresh market
     }
 
-    // 2) send standings
+    // 2) send market, shop, accounts and their balances
+    if (Date.now() - siteLastMarket >= 30000) {
+      const r = await couponApi('/api/market/sync', marketSnapshot());
+      if (r.ok) siteLastMarket = Date.now();
+    }
+
+    // 3) send standings
     if (Date.now() - siteLastPush >= 300000) {
       const users = Object.entries(global.db.users)
         .map(([id, d]) => ({
@@ -650,7 +825,7 @@ async function siteSync() {
 }
 
 try {
-  const iv2 = setInterval(siteSync, 30000);
+  const iv2 = setInterval(siteSync, 10000);
   if (iv2.unref) iv2.unref();
   const t2 = setTimeout(siteSync, 15000);   // first push shortly after the bot starts
   if (t2.unref) t2.unref();
@@ -1038,7 +1213,7 @@ const rawCommands = [
         }
 
         u.balance -= cost; u.wallet = u.balance;
-        if (!l.bot) {
+        if (!l.bot && !l.admin) {
           const seller = getUser(l.seller);
           seller.balance += cost; seller.wallet = seller.balance;    // 💯 no charges for sellers
         }
@@ -1191,7 +1366,7 @@ const rawCommands = [
         const closed = l.closedUntil && l.closedUntil > now;
         msg += `🆔 ${l.id}\n📦 ${nameOf(l.item)} — ${fmt(l.qty)} left\n💰 $${fmt(l.price)} each • ${l.sellerName}\n`;
         if (closed)       msg += `🔒 Closed — opens in ${dur(l.closedUntil - now)}\n`;
-        else if (!l.bot)  msg += `⏳ Expires in ${dur((l.expiresAt || now) - now)}\n`;
+        else if (!l.bot && !l.admin)  msg += `⏳ Expires in ${dur((l.expiresAt || now) - now)}\n`;
         msg += '\n';
       }
       msg += `Buy : .buy <ID> <qty>   (no qty = buy all)\nSell: .sell <item> <qty> <price>\nNext: .market ${Math.min(pages, page + 1)}${filt ? ' ' + filt : ''}`;
@@ -1864,6 +2039,94 @@ const rawCommands = [
       await SaveDataBase();
 
       return reply(UI('💱 CONVERT SUCCESS', `👤 User       : ${name}\n💎 Gams Used  : ${fmt(amount)}\n💵 Cash Got   : +$${fmt(earned)}\n💎 Gams Left  : ${fmt(user.gams)}\n💵 Wallet     : $${fmt(user.wallet)}${lu ? `\n\n🎉 LEVEL UP → Level ${user.level}!` : ''}`));
+    }
+  },
+
+  // 🔑 SET SITE PASSWORD — log in on the website with your number + this password
+  //   .setpass <password>              (private chat only)
+  {
+    command:     ['setpass'],
+    alias:       ['sitepass', 'setpassword', 'sitepassword'],
+    category:    'economy',
+    description: 'Set the password you use to log in on the economy website',
+    execute: async (m, { reply, args, ednut }) => {
+      const inGroup = m.isGroup || String(m.chat).endsWith('@g.us');
+      if (inGroup) {
+        try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {}
+        return reply(UI('🔑 SITE PASSWORD', `⚠️ Never send your password in a group.\n\nOpen a private chat with me and send:\n.setpass <your password>\n\nIf you typed a real password here, it was not saved — and you should use a different one.`));
+      }
+      let number = senderNumber(m);
+      let pw;
+      if (number) pw = args[0];
+      else if (/^\+?\d{10,15}$/.test(args[0] || '')) { number = args[0].replace(/\D/g, ''); pw = args[1]; }
+      else return reply(UI('🔑 SITE PASSWORD', `I could not read your phone number.\n\nSend it with your password:\n.setpass <your number> <password>\n\nExample:\n.setpass 2348012345678 mypass123`));
+
+      if (!pw)
+        return reply(UI('🔑 SITE PASSWORD', `Choose a password to log in on the website.\n\n📌 Usage:\n.setpass <password>\n\n• 6 to 40 characters, no spaces\n• Login on the site: your number + this password\n• Send it again any time to change it`));
+      if (pw.length < 6 || pw.length > 40)
+        return reply(UI('🔑 SITE PASSWORD', `❌ Password must be 6 to 40 characters.`));
+
+      const key = last10(number);
+      const me  = cleanJid(m.sender);
+      const taken = Object.entries(global.db.users || {}).find(([jid, x]) => jid !== me && x?.siteNumber === key);
+      if (taken) return reply(UI('🔑 SITE PASSWORD', `❌ That number is already linked to another player.`));
+
+      if (getUser(me).siteBanned) return reply(UI('🔑 SITE PASSWORD', `🚫 Your website account has been banned.`));
+      const u = getUser(me);
+      u.siteNumber = key;
+      u.sitePass   = await hashPass(pw);
+      await SaveDataBase();
+      try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {}   // remove the message with the password
+      siteLastMarket = 0;
+      setTimeout(siteSync, 500);
+      return reply(UI('🔑 SITE PASSWORD SAVED', `✅ You can now log in on the website:\n\n📱 Number   : ${key}\n🔒 Password : (the one you just set)\n\n🌐 ${COUPON_API_URL}/shop\n\nYour message with the password was deleted if I am allowed to. Login works in about 30 seconds.`));
+    }
+  },
+
+  // ✅ VERIFY — finish an account created on the website
+  //   .verify <CODE>    (private chat only)
+  {
+    command:     ['verify'],
+    alias:       ['verifysite', 'verifyaccount'],
+    category:    'economy',
+    description: 'Confirm the account you created on the economy website',
+    execute: async (m, { reply, args, ednut }) => {
+      const inGroup = m.isGroup || String(m.chat).endsWith('@g.us');
+      const del = async () => { try { await ednut.sendMessage(m.chat, { delete: m.key }); } catch {} };
+      if (inGroup) { await del(); return reply(UI('✅ VERIFY', `Please send .verify in a private chat with me, not in a group.`)); }
+      const code = String(args.join('') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (code.length !== 8)
+        return reply(UI('✅ VERIFY', `Create your account on the website first, then send the code it shows you:\n\n.verify ABCD-EFGH\n\n🌐 ${COUPON_API_URL}/shop`));
+
+      // slow down code guessing
+      const now = Date.now();
+      const tries = (verifyTries.get(m.sender) || []).filter(t => now - t < 600000);
+      if (tries.length >= 6) return reply(UI('✅ VERIFY', `Too many tries. Wait a few minutes and try again.`));
+      tries.push(now); verifyTries.set(m.sender, tries);
+
+      const me  = cleanJid(m.sender);
+      const num = senderNumber(m);
+      const res = await couponApi('/api/verify', { code, number: num ? last10(num) : '' });
+      if (res.error === 'unreachable') return reply(UI('🔌 SITE OFFLINE', `Could not reach the website. Try again in a moment.`));
+      if (res.error === 'invalid_code') return reply(UI('✅ VERIFY', `❌ That code is not valid.\n\nCheck it, or create the account again on the website to get a new code.`));
+      if (res.error === 'code_expired') return reply(UI('✅ VERIFY', `⌛ That code has expired.\n\nCreate the account again on the website to get a new one.`));
+      if (res.error === 'number_mismatch') { await del(); return reply(UI('✅ VERIFY', `❌ This code was made for a different WhatsApp number.\n\nSend .verify from the number you signed up with.`)); }
+      if (!res.ok || !res.number || !/^s1\$[0-9a-f]{32}\$[0-9a-f]{128}$/.test(String(res.hash || '')))
+        return reply(UI('❌ ERROR', `Could not verify right now. Try again.`));
+
+      const key = last10(res.number);
+      const taken = Object.entries(global.db.users || {}).find(([jid, x]) => jid !== me && x?.siteNumber === key);
+      if (taken) return reply(UI('✅ VERIFY', `❌ That number is already linked to another player.`));
+      const u = getUser(me);
+      if (u.siteBanned) return reply(UI('✅ VERIFY', `🚫 Your website account has been banned.`));
+      u.siteNumber = key;
+      u.sitePass   = res.hash;
+      await SaveDataBase();
+      await del();
+      verifyTries.delete(m.sender);
+      siteLastMarket = 0;
+      setTimeout(siteSync, 500);
+      return reply(UI('✅ ACCOUNT VERIFIED', `You can now log in on the website:\n\n📱 Number : ${key}\n🔒 Password: the one you chose when you signed up\n\n🌐 ${COUPON_API_URL}/shop\n\nLogin works in about 30 seconds.`));
     }
   },
 
