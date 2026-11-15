@@ -636,43 +636,69 @@ function learnAliases(m) {
   } catch {}
 }
 
+// an "empty" account = created by a payment sent to the wrong id (no name, no activity)
+function isGhost(u) {
+  return !u || (!u.name && !u.lastDaily && !u.lastWork && !u.lastRob && !u.lastMine &&
+    (u.level || 1) <= 1 && !u.exp && !u.bank && !u.gams && !u.siteNumber &&
+    !Object.values(u.inventory || {}).some(q => q > 0));
+}
+
+// move everything from the empty account into the real one, then delete the empty one
+function mergeInto(realKey, ghostKey) {
+  const users = global.db.users;
+  const g = users[ghostKey];
+  if (!g || realKey === ghostKey) return;
+  const r = getUser(realKey);
+  r.balance += g.balance || 0; r.wallet = r.balance;
+  r.bank    += g.bank    || 0;
+  r.gams    += g.gams    || 0;
+  for (const [k, q] of Object.entries(g.inventory || {}))
+    if (q > 0) r.inventory[k] = (r.inventory[k] || 0) + q;
+  delete users[ghostKey];
+  if (!global.db.jidMap) global.db.jidMap = {};
+  global.db.jidMap[ghostKey] = realKey;
+}
+
 async function resolveTarget(raw, conn, chat) {
   if (!raw || !global.db) return null;
   const users = global.db.users || {};
-  const map   = global.db.jidMap || {};
+  const map   = global.db.jidMap || (global.db.jidMap = {});
   const c     = cleanJid(String(raw));
 
-  const tryKey = (j) => {
-    if (!j) return null;
+  // every id this person could be known by
+  const cands = new Set([c]);
+  const addId = (j) => {
+    if (!j) return;
     j = cleanJid(String(j));
-    if (users[j]) return j;
-    if (map[j] && users[map[j]]) return map[j];
-    if (/@s\.whatsapp\.net$/.test(j)) {
-      const p = map['pn:' + last10(idDigits(j))];
-      if (p && users[p]) return p;
-    }
-    return null;
+    cands.add(j);
+    if (map[j]) cands.add(map[j]);
+    if (/@s\.whatsapp\.net$/.test(j) && map['pn:' + last10(idDigits(j))]) cands.add(map['pn:' + last10(idDigits(j))]);
   };
+  addId(c);
 
-  let hit = tryKey(c);
-  if (hit) return hit;
-
-  // look the person up in the group: it lists their @lid AND phone id together
   try {
     const meta = await conn.groupMetadata(chat);
     const ids  = (p) => [p.id, p.lid, p.jid, p.phoneNumber].filter(Boolean).map(x => cleanJid(String(x)));
     const p    = meta.participants.find(x => ids(x).includes(c));
-    if (p) for (const j of ids(p)) { hit = tryKey(j); if (hit) return hit; }
+    if (p) ids(p).forEach(addId);
   } catch {}
 
-  // last resort: match by phone number
+  // match by phone number too
   const d = last10(idDigits(c));
   if (d.length === 10) {
-    const e = Object.entries(users).find(([k, u]) =>
-      u?.siteNumber === d || (/@s\.whatsapp\.net$/.test(k) && last10(idDigits(k)) === d));
-    if (e) return e[0];
+    for (const [k, u] of Object.entries(users))
+      if (u?.siteNumber === d || (/@s\.whatsapp\.net$/.test(k) && last10(idDigits(k)) === d)) cands.add(k);
   }
-  return null;
+
+  const found = [...cands].filter(j => users[j]);
+  if (!found.length) return null;
+
+  const real = found.find(j => !isGhost(users[j]));
+  if (!real) return null;                         // only empty accounts exist → player never used the bot
+
+  for (const j of found) if (j !== real && isGhost(users[j])) mergeInto(real, j);
+  for (const j of cands) if (j !== real) map[j] = real;
+  return real;
 }
 
 function hashPass(pw) {
