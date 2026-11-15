@@ -619,21 +619,14 @@ const last10 = (s) => String(s || '').replace(/\D/g, '').slice(-10);
 // db key. resolveTarget() then turns any tag / reply / typed number into the
 // account that player really uses (never a ghost account).
 // ================================================================
-function learnAliases(m) {
+// the bot's OWN account ids (the bot runs on a real person's number — people pay that person too)
+function selfIds(conn) {
+  const out = [];
   try {
-    if (!m?.sender || !global.db) return;
-    const me = cleanJid(m.sender);
-    if (!global.db.jidMap) global.db.jidMap = {};
-    const list = [m.sender, m.key?.participant, m.key?.participantPn, m.key?.participantAlt,
-                  m.participantPn, m.senderPn];
-    if (!m.key?.fromMe) list.push(m.key?.remoteJidAlt);
-    for (const a of list.filter(Boolean).map(String)) {
-      if (a.endsWith('@g.us') || a === 'status@broadcast') continue;
-      const c = cleanJid(a);
-      global.db.jidMap[c] = me;
-      if (/@s\.whatsapp\.net$/.test(c)) global.db.jidMap['pn:' + last10(idDigits(c))] = me;
-    }
+    for (const j of [conn?.user?.id, conn?.user?.lid, conn?.user?.jid])
+      if (j) out.push(cleanJid(String(j)));
   } catch {}
+  return out;
 }
 
 // an "empty" account = created by a payment sent to the wrong id (no name, no activity)
@@ -643,7 +636,7 @@ function isGhost(u) {
     !Object.values(u.inventory || {}).some(q => q > 0));
 }
 
-// move everything from the empty account into the real one, then delete the empty one
+// move everything from one account into the other, then delete it
 function mergeInto(realKey, ghostKey) {
   const users = global.db.users;
   const g = users[ghostKey];
@@ -654,19 +647,53 @@ function mergeInto(realKey, ghostKey) {
   r.gams    += g.gams    || 0;
   for (const [k, q] of Object.entries(g.inventory || {}))
     if (q > 0) r.inventory[k] = (r.inventory[k] || 0) + q;
+  if ((g.level || 1) > (r.level || 1)) { r.level = g.level; r.exp = g.exp || 0; }
+  if (!r.name && g.name) r.name = g.name;
+  if ((!r.job || r.job === 'Unemployed') && g.job) r.job = g.job;
   delete users[ghostKey];
   if (!global.db.jidMap) global.db.jidMap = {};
   global.db.jidMap[ghostKey] = realKey;
 }
 
+// runs before every command: remembers every id of the sender and folds any
+// stray account made under one of those ids into the account they really use.
+// returns true if something was merged (so the caller can save)
+function learnAliases(m, conn) {
+  try {
+    if (!m?.sender || !global.db) return false;
+    if (!global.db.users) global.db.users = {};
+    const me = cleanJid(m.sender);
+    if (!global.db.jidMap) global.db.jidMap = {};
+    const mine = !!m.key?.fromMe || selfIds(conn).includes(me);
+    const list = [m.sender, m.key?.participant, m.key?.participantPn, m.key?.participantAlt,
+                  m.participantPn, m.senderPn];
+    if (mine) list.push(...selfIds(conn));          // sent from the bot's own number
+    else      list.push(m.key?.remoteJidAlt);
+    let merged = false;
+    for (const a of list.filter(Boolean).map(String)) {
+      if (a.endsWith('@g.us') || a === 'status@broadcast') continue;
+      const c = cleanJid(a);
+      global.db.jidMap[c] = me;
+      if (/@s\.whatsapp\.net$/.test(c)) global.db.jidMap['pn:' + last10(idDigits(c))] = me;
+      if (c !== me && c !== m.sender && global.db.users[c]) {
+        mergeInto(global.db.users[m.sender] ? m.sender : me, c);
+        merged = true;
+      }
+    }
+    return merged;
+  } catch { return false; }
+}
+
+// Turn ANY id (tag, reply, typed number) into the account that player really uses.
+// Returns null if there is no real account (so we never pay a ghost) — except the
+// bot's own number, which is always payable.
 async function resolveTarget(raw, conn, chat) {
   if (!raw || !global.db) return null;
-  const users = global.db.users || {};
+  const users = global.db.users || (global.db.users = {});
   const map   = global.db.jidMap || (global.db.jidMap = {});
   const c     = cleanJid(String(raw));
 
-  // every id this person could be known by
-  const cands = new Set([c]);
+  const cands = new Set();
   const addId = (j) => {
     if (!j) return;
     j = cleanJid(String(j));
@@ -676,11 +703,13 @@ async function resolveTarget(raw, conn, chat) {
   };
   addId(c);
 
+  // the group lists a person's @lid AND phone id together
+  let notify = '';
   try {
     const meta = await conn.groupMetadata(chat);
     const ids  = (p) => [p.id, p.lid, p.jid, p.phoneNumber].filter(Boolean).map(x => cleanJid(String(x)));
     const p    = meta.participants.find(x => ids(x).includes(c));
-    if (p) ids(p).forEach(addId);
+    if (p) { ids(p).forEach(addId); notify = p.notify || p.name || ''; }
   } catch {}
 
   // match by phone number too
@@ -690,14 +719,27 @@ async function resolveTarget(raw, conn, chat) {
       if (u?.siteNumber === d || (/@s\.whatsapp\.net$/.test(k) && last10(idDigits(k)) === d)) cands.add(k);
   }
 
+  // is this person the bot's own number?
+  const mine   = selfIds(conn);
+  const selfPn = mine.find(j => /@s\.whatsapp\.net$/.test(j)) || mine[0] || null;
+  const isSelf = !!selfPn && [...cands].some(j => mine.includes(j) ||
+    (/@s\.whatsapp\.net$/.test(j) && last10(idDigits(j)) === last10(idDigits(selfPn))));
+  if (isSelf) mine.forEach(j => cands.add(j));
+
   const found = [...cands].filter(j => users[j]);
-  if (!found.length) return null;
+  let real = found.find(j => !isGhost(users[j]));
+  if (!real && isSelf) real = selfPn;             // bot owner: always payable
+  if (!real) return null;                         // only empty accounts → player never used the bot
 
-  const real = found.find(j => !isGhost(users[j]));
-  if (!real) return null;                         // only empty accounts exist → player never used the bot
-
-  for (const j of found) if (j !== real && isGhost(users[j])) mergeInto(real, j);
+  getUser(real);
+  for (const j of found) if (j !== real && (isSelf || isGhost(users[j]))) mergeInto(real, j);
   for (const j of cands) if (j !== real) map[j] = real;
+
+  const u = users[real];
+  if (!u.name) {
+    const nm = notify || (isSelf ? (conn?.user?.name || conn?.user?.verifiedName || '') : '');
+    if (nm) u.name = nm;
+  }
   return real;
 }
 
@@ -2452,7 +2494,7 @@ module.exports = rawCommands.map(cmd => {
     if (!mongoReady())
       return ctx.reply(UI('🚨 SYSTEM LOCK',
         'Economy is locked. Add a Mongo URL in the MONGO_URLS list in lib/mongodb.js first.'));
-    learnAliases(m);
+    try { if (learnAliases(m, ctx.ednut)) await SaveDataBase(); } catch {}
     rememberName(m);
     try { if (economyTick()) await SaveDataBase(); } catch {}
 
@@ -2467,10 +2509,11 @@ module.exports = rawCommands.map(cmd => {
         const q = await resolveTarget(m.quoted.sender, ctx.ednut, m.chat);
         if (q) { try { m.quoted.sender = q; } catch {} }
       }
+      await SaveDataBase();
     } catch {}
 
     try { return await orig(m, ctx); }
-    finally { rememberName(m); learnAliases(m); }
+    finally { rememberName(m); learnAliases(m, ctx.ednut); }
   };
   return cmd;
 });
