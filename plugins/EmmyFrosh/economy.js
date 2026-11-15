@@ -612,6 +612,69 @@ let siteWatch = [];          // jids that have a site account (balances are sent
 
 const last10 = (s) => String(s || '').replace(/\D/g, '').slice(-10);
 
+// ================================================================
+// 🔗 JID RESOLVER — fixes "money sent but receiver doesn't get it"
+// WhatsApp gives the SAME person different ids (@lid, @s.whatsapp.net, :device).
+// Every time someone sends a command we remember ALL their ids → their real
+// db key. resolveTarget() then turns any tag / reply / typed number into the
+// account that player really uses (never a ghost account).
+// ================================================================
+function learnAliases(m) {
+  try {
+    if (!m?.sender || !global.db) return;
+    const me = cleanJid(m.sender);
+    if (!global.db.jidMap) global.db.jidMap = {};
+    const list = [m.sender, m.key?.participant, m.key?.participantPn, m.key?.participantAlt,
+                  m.participantPn, m.senderPn];
+    if (!m.key?.fromMe) list.push(m.key?.remoteJidAlt);
+    for (const a of list.filter(Boolean).map(String)) {
+      if (a.endsWith('@g.us') || a === 'status@broadcast') continue;
+      const c = cleanJid(a);
+      global.db.jidMap[c] = me;
+      if (/@s\.whatsapp\.net$/.test(c)) global.db.jidMap['pn:' + last10(idDigits(c))] = me;
+    }
+  } catch {}
+}
+
+async function resolveTarget(raw, conn, chat) {
+  if (!raw || !global.db) return null;
+  const users = global.db.users || {};
+  const map   = global.db.jidMap || {};
+  const c     = cleanJid(String(raw));
+
+  const tryKey = (j) => {
+    if (!j) return null;
+    j = cleanJid(String(j));
+    if (users[j]) return j;
+    if (map[j] && users[map[j]]) return map[j];
+    if (/@s\.whatsapp\.net$/.test(j)) {
+      const p = map['pn:' + last10(idDigits(j))];
+      if (p && users[p]) return p;
+    }
+    return null;
+  };
+
+  let hit = tryKey(c);
+  if (hit) return hit;
+
+  // look the person up in the group: it lists their @lid AND phone id together
+  try {
+    const meta = await conn.groupMetadata(chat);
+    const ids  = (p) => [p.id, p.lid, p.jid, p.phoneNumber].filter(Boolean).map(x => cleanJid(String(x)));
+    const p    = meta.participants.find(x => ids(x).includes(c));
+    if (p) for (const j of ids(p)) { hit = tryKey(j); if (hit) return hit; }
+  } catch {}
+
+  // last resort: match by phone number
+  const d = last10(idDigits(c));
+  if (d.length === 10) {
+    const e = Object.entries(users).find(([k, u]) =>
+      u?.siteNumber === d || (/@s\.whatsapp\.net$/.test(k) && last10(idDigits(k)) === d));
+    if (e) return e[0];
+  }
+  return null;
+}
+
 function hashPass(pw) {
   return new Promise((resolve, reject) => {
     const salt = crypto.randomBytes(16).toString('hex');
@@ -944,39 +1007,44 @@ const rawCommands = [
     }
   },
 
-  // 💸 PAY
+  // 💸 PAY — resolves the receiver to the account they REALLY use, so the money always arrives
   {
     command:     ['pay'],
     alias:       ['transfer', 'give'],
     category:    'economy',
     description: 'Send money to another user (min $10)',
     execute: async (m, { reply, args, ednut }) => {
-      const viaTag = m.quoted?.sender || m.mentionedJid?.[0];
-      const target = viaTag
-        || (args.length > 1 && args[0]?.replace(/\D/g, '').length >= 7 ? args[0].replace(/\D/g, '') + '@s.whatsapp.net' : null);
-      const amount = parseAmount(args[viaTag ? args.length - 1 : 1], getUser(m.sender).balance);
+      const viaTag    = m.quoted?.sender || m.mentionedJid?.[0];
+      const typed     = !viaTag && args.length > 1 && args[0]?.replace(/\D/g, '').length >= 7
+        ? args[0].replace(/\D/g, '') + '@s.whatsapp.net' : null;
+      const rawTarget = viaTag || typed;
+      const sender    = getUser(m.sender);
+      const amount    = parseAmount(args[viaTag ? args.length - 1 : 1], sender.balance);
 
-      if (!target)
+      if (!rawTarget)
         return reply(UI('❌ ERROR', 'Please tag or quote the user you want to pay.\n\nUsage: .pay @user 5000 (or 10k, 1m, all)'));
-      if (!amount || amount < 10)
+      if (!amount || isNaN(amount) || amount < 10)
         return reply(UI('❌ ERROR', 'Invalid amount. Minimum pay is $10.\n\nUsage: .pay @user 5000'));
-      if (target === m.sender)
+
+      // 🎯 find the account this person REALLY uses
+      const target = await resolveTarget(rawTarget, ednut, m.chat);
+      if (!target)
+        return reply(UI('❌ PLAYER NOT FOUND', `I can't find that player's account.\n\nAsk them to send any economy command once (like .bal), then try again.\n\n💵 Nothing was taken from you.`));
+      if (target === m.sender || target === cleanJid(m.sender))
         return reply(UI('❌ ERROR', 'You cannot pay yourself.'));
 
-      const s = getUser(m.sender);
-      const r = getUser(target);
+      if (sender.balance < amount)
+        return reply(UI('❌ INSUFFICIENT', `You need $${fmt(amount)} but only have $${fmt(sender.balance)} in your wallet.`));
 
-      if (s.balance < amount)
-        return reply(UI('❌ INSUFFICIENT', `You need $${fmt(amount)} but only have $${fmt(s.balance)} in your wallet.`));
-
+      const receiver   = getUser(target);
       const senderName = m.pushName || numTag(m.sender);
       const targetName = await getName(target, null, ednut, m.chat);
 
-      s.balance -= amount; s.wallet = s.balance;
-      r.balance += amount; r.wallet = r.balance;
+      sender.balance   -= amount; sender.wallet   = sender.balance;
+      receiver.balance += amount; receiver.wallet = receiver.balance;
       await SaveDataBase();
 
-      reply(UI('✅ PAYMENT SENT', `💸 Amount  : $${fmt(amount)}\n📤 From    : ${senderName}\n📥 To      : ${targetName}\n\n💵 Your Wallet : $${fmt(s.wallet)}`));
+      reply(UI('✅ PAYMENT SENT', `💸 Amount  : $${fmt(amount)}\n📤 From    : ${senderName}\n📥 To      : ${targetName}\n\n💵 Your Wallet : $${fmt(sender.wallet)}\n💵 ${targetName}'s Wallet : $${fmt(receiver.wallet)}`));
     }
   },
 
@@ -2348,6 +2416,9 @@ const rawCommands = [
 
 // ================================================================
 // 🔐 MONGO GATE (reads lib/mongodb.js) + market upkeep before every command
+// Also swaps every tagged / replied id for the account key that player
+// really uses, so rob / send / f2f / pvpdice / bal / inv / profile / setwork
+// all hit the right account too.
 // ================================================================
 module.exports = rawCommands.map(cmd => {
   const orig = cmd.execute;
@@ -2355,10 +2426,25 @@ module.exports = rawCommands.map(cmd => {
     if (!mongoReady())
       return ctx.reply(UI('🚨 SYSTEM LOCK',
         'Economy is locked. Add a Mongo URL in the MONGO_URLS list in lib/mongodb.js first.'));
+    learnAliases(m);
     rememberName(m);
     try { if (economyTick()) await SaveDataBase(); } catch {}
+
+    // 🔄 swap tagged / replied ids for the real account key
+    try {
+      if (Array.isArray(m.mentionedJid) && m.mentionedJid.length) {
+        const fixed = [];
+        for (const j of m.mentionedJid) fixed.push((await resolveTarget(j, ctx.ednut, m.chat)) || j);
+        m.mentionedJid = fixed;
+      }
+      if (m.quoted?.sender) {
+        const q = await resolveTarget(m.quoted.sender, ctx.ednut, m.chat);
+        if (q) { try { m.quoted.sender = q; } catch {} }
+      }
+    } catch {}
+
     try { return await orig(m, ctx); }
-    finally { rememberName(m); }
+    finally { rememberName(m); learnAliases(m); }
   };
   return cmd;
 });
