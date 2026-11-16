@@ -240,7 +240,32 @@ const COINS = {
   xrp:  { name:'✖️ XRP',              rate:900 },
   pol:  { name:'🟣 Polygon (POL)',    rate:700 },
   trx:  { name:'🔺 TRON (TRX)',       rate:180 },
-  doge: { name:'🐕 Dogecoin (DOGE)',  rate:250 }
+  doge: { name:'🐕 Dogecoin (DOGE)',  rate:250 },
+  // 🆕 more coins
+  dai:  { name:'🟡 DAI',               rate:1600 },
+  shib: { name:'🐶 Shiba Inu (SHIB)',  rate:8 },
+  pepe: { name:'🐸 Pepe (PEPE)',       rate:5 },
+  uni:  { name:'🦄 Uniswap (UNI)',     rate:12000 },
+  aave: { name:'👻 Aave (AAVE)',       rate:280000 },
+  mkr:  { name:'🏛️ Maker (MKR)',       rate:3000000 },
+  apt:  { name:'🅰️ Aptos (APT)',       rate:12000 },
+  arb:  { name:'🔵 Arbitrum (ARB)',    rate:1500 },
+  op:   { name:'🔴 Optimism (OP)',     rate:3500 },
+  fil:  { name:'📁 Filecoin (FIL)',    rate:7500 },
+  hbar: { name:'🌀 Hedera (HBAR)',     rate:350 },
+  icp:  { name:'♾️ Internet Computer (ICP)', rate:14000 },
+  xlm:  { name:'✴️ Stellar (XLM)',     rate:600 },
+  etc:  { name:'🟩 Ethereum Classic (ETC)', rate:38000 },
+  algo: { name:'⚙️ Algorand (ALGO)',   rate:400 },
+  inj:  { name:'💉 Injective (INJ)',   rate:35000 },
+  ldo:  { name:'🌊 Lido DAO (LDO)',    rate:3200 },
+  tia:  { name:'🌌 Celestia (TIA)',    rate:11000 },
+  sei:  { name:'🌊 Sei (SEI)',         rate:900 },
+  wld:  { name:'👁️ Worldcoin (WLD)',   rate:6000 },
+  fet:  { name:'🤖 Fetch.ai (FET)',    rate:2000 },
+  rune: { name:'⚡ THORChain (RUNE)',  rate:8000 },
+  stx:  { name:'🧱 Stacks (STX)',      rate:2500 },
+  cake: { name:'🥞 PancakeSwap (CAKE)', rate:4500 }
 };
 
 const isItem = (k) => !!(SHOP[k] || COINS[k]);
@@ -450,14 +475,15 @@ function botPrice(k) {
   return Math.max(1, p);
 }
 
-function spawnBot(k, sellerName) {
+function spawnBot(k, sellerName, stock) {
   const m    = global.db.market;
   const used = new Set(Object.values(m).filter(l => l.item === k).map(l => l.sellerName));
   const pool = SELLERS.filter(s => !used.has(s));
   const id   = genId();
+  const qty  = stock && stock > 0 ? Math.floor(stock) : BOT_STOCK;
   m[id] = {
     id, seller: 'bot', sellerName: sellerName || pick(pool.length ? pool : SELLERS), bot: true,
-    item: k, qty: BOT_STOCK, price: botPrice(k),
+    item: k, qty, maxStock: qty, lastRefill: Date.now(), price: botPrice(k),
     createdAt: Date.now(), closedUntil: 0, unit: true
   };
   return id;
@@ -479,9 +505,12 @@ function repriceBot(k) {
 
 function botCount() { return Object.values(global.db.market).filter(l => l.bot).length; }
 
-// a bot seller sold out → he disappears and returns in 24h with fresh stock
+// a bot seller SOLD OUT → he disappears and returns in 24h with MORE stock than before
+// 10k → 20k or 30k → (30k or 40k) / (40k or 50k) ... keeps growing every time he sells out
 function scheduleRestock(l) {
-  eco().restock.push({ sellerName: l.sellerName, item: l.item, at: Date.now() + RESTOCK_MS });
+  const prev = l.maxStock || BOT_STOCK;
+  const next = Math.min(prev + BOT_STOCK * pick([1, 2]), 1e9);
+  eco().restock.push({ sellerName: l.sellerName, item: l.item, at: Date.now() + RESTOCK_MS, stock: next });
 }
 
 function hideItem(k) {
@@ -594,16 +623,38 @@ function economyTick() {
   if (e.restock.length) {
     const keep = [];
     for (const r of e.restock) {
-      if (r.at <= now) { spawnBot(r.item, r.sellerName); changed = true; }
+      if (r.at <= now) { spawnBot(r.item, r.sellerName, r.stock); changed = true; }
       else keep.push(r);
     }
     e.restock = keep;
+  }
+
+  // 6b) 📦 sellers who did NOT sell out: after 24h the sold units come back (up to their full stock)
+  for (const l of Object.values(m)) {
+    if (!l.bot) continue;
+    if (!l.maxStock) { l.maxStock = Math.max(BOT_STOCK, l.qty); l.lastRefill = now; changed = true; }
+    if (l.qty >= l.maxStock) { l.lastRefill = now; continue; }          // full → 24h clock starts at first sale
+    if (!l.lastRefill) l.lastRefill = now;
+    if (now - l.lastRefill >= DAY) {
+      l.qty = l.maxStock;
+      l.lastRefill = now;
+      changed = true;
+    }
   }
 
   // 8) 📈 daily inventory growth (checked every 10 min)
   if (!e.lastInv || now - e.lastInv >= 600000) {
     if (dailyInventoryTick()) changed = true;
     e.lastInv = now;
+  }
+
+  // 6c) 🪙 every coin always has at least one seller (new coins get one automatically)
+  {
+    const inMarket  = new Set(Object.values(m).filter(l => l.bot).map(l => l.item));
+    const returning = new Set((e.restock || []).map(r => r.item));
+    for (const k of Object.keys(COINS)) {
+      if (!inMarket.has(k) && !returning.has(k)) { spawnBot(k); changed = true; }
+    }
   }
 
   // 7) first-time seeding only
@@ -1408,7 +1459,7 @@ const rawCommands = [
           delete market[id];
           if (l.bot) {
             scheduleRestock(l);
-            extra = `\n\n📢 *${l.sellerName}* sold out of ${nameOf(l.item)}!\n🔄 They will be back with fresh stock in 24 hours.`;
+            extra = `\n\n📢 *${l.sellerName}* sold out of ${nameOf(l.item)}!\n🔄 They will be back in 24 hours with MORE stock than before.`;
           } else {
             extra = `\n\n📢 *${l.sellerName}* sold out!`;
           }
