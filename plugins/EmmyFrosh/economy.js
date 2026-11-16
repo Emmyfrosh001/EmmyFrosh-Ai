@@ -247,13 +247,14 @@ const isItem = (k) => !!(SHOP[k] || COINS[k]);
 const nameOf = (k) => (SHOP[k] || COINS[k])?.name || k;
 
 // ================================================================
-// 💹 ITEM VALUE APPRECIATION
-// Items quietly gain a small bonus for every 24h you hold them
-// (~0.025% of the shop price per day). The bonus is added on top
-// of the instant-sell price. Coins don't appreciate (their rate moves).
+// 💹 ITEM VALUE APPRECIATION — every 24h each item in the bag gains value
+// The bonus is added on top of the instant-sell price.
+// Coins don't appreciate (their rate moves).
 // ================================================================
+const DAILY_GAIN_PCT = 0.00025;   // 0.025% of shop price per item per day (raise to grow faster)
+
 function dailyGainFor(buyPrice) {
-  return Math.max(1, Math.floor(buyPrice * 0.00025));
+  return Math.max(1, Math.floor(buyPrice * DAILY_GAIN_PCT));
 }
 
 function tickItemValue(u, key) {
@@ -271,6 +272,25 @@ function tickItemValue(u, key) {
     iv.lastGain += ticks * DAY;
   }
   return iv;
+}
+
+// credits EVERY player's items (even people who never open .inv)
+function dailyInventoryTick() {
+  let changed = false;
+  for (const u of Object.values(global.db.users || {})) {
+    if (!u || !u.inventory) continue;
+    for (const [k, q] of Object.entries(u.inventory)) {
+      if (!SHOP[k]) continue;
+      if (!(q > 0)) {                                  // sold all → reset old bonus
+        if (u.itemValue && u.itemValue[k]) { delete u.itemValue[k]; changed = true; }
+        continue;
+      }
+      const before = u.itemValue?.[k]?.bonus ?? -1;    // -1 = item had no timer yet → starts now
+      const after  = tickItemValue(u, k).bonus;
+      if (after !== before) changed = true;
+    }
+  }
+  return changed;
 }
 
 // ✅ NAMES, never numbers / @lid ids.
@@ -349,7 +369,7 @@ const f2fTrades = new Map();
 //   id, seller, sellerName, bot, item, qty, price (PER UNIT),
 //   createdAt, expiresAt (players only, 24h), closedUntil (bot stalls), unit:true
 // }
-// global.db.economy = { hidden, coinRates, lastTick, lastCoin, restock[], seeded }
+// global.db.economy = { hidden, coinRates, lastTick, lastCoin, lastInv, restock[], seeded }
 //
 //  • Player listings expire after 24h and the items go back to the seller.
 //  • Bot sellers hold 10,000 units each. When one SELLS OUT it leaves the
@@ -578,6 +598,12 @@ function economyTick() {
       else keep.push(r);
     }
     e.restock = keep;
+  }
+
+  // 8) 📈 daily inventory growth (checked every 10 min)
+  if (!e.lastInv || now - e.lastInv >= 600000) {
+    if (dailyInventoryTick()) changed = true;
+    e.lastInv = now;
   }
 
   // 7) first-time seeding only
@@ -1584,7 +1610,7 @@ const rawCommands = [
     }
   },
 
-  // 🎒 INVENTORY
+  // 🎒 INVENTORY — shows worth + how much each item grows every 24h
   {
     command:     ['inventory'],
     alias:       ['inv', 'bag', 'items'],
@@ -1601,10 +1627,16 @@ const rawCommands = [
       if (!items.length)
         return reply(UI('🎒 INVENTORY', `${name}'s bag is empty.\nUse .buy to get items.`));
       let msg = `${name}'s Inventory:\n\n`;
+      let perDay = 0;
       for (const [k, q] of items) {
-        const worth = unitPrice(k) + (COINS[k] ? 0 : tickItemValue(u, k).bonus);
-        msg += `• ${nameOf(k)} x${fmt(q)}\n   💰 Worth $${fmt(worth)} each ($${fmt(worth * q)} total)\n`;
+        const bonus = COINS[k] ? 0 : tickItemValue(u, k).bonus;
+        const worth = unitPrice(k) + bonus;
+        const gain  = COINS[k] ? 0 : dailyGainFor(SHOP[k].buy);
+        perDay += gain * q;
+        msg += `• ${nameOf(k)} x${fmt(q)}\n   💰 Worth $${fmt(worth)} each ($${fmt(worth * q)} total)\n` +
+               (gain ? `   📈 +$${fmt(gain)}/day each\n` : '');
       }
+      msg += `\n⏰ Your bag grows by about $${fmt(perDay)} every 24 hours.`;
       await SaveDataBase();
       reply(UI('🎒 INVENTORY', msg.trim()));
     }
