@@ -6,6 +6,7 @@ const axios = require("axios")
 const MONEYBLINK_KEY =
   process.env.MONEYBLINK_KEY || "524de9dbd18357810a9e6b76810ace32d81a7d5f" // regenerate this if the file was shared publicly
 const TIMEOUT = 20000
+const DEBUG = true // true = bot replies with the real failure reasons (turn off once it works)
 const UA =
   "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
@@ -43,12 +44,12 @@ function absUrl(u, base = "https://www.tikwm.com") {
 }
 
 // Downloads a file into a Buffer (WhatsApp often can't fetch TikTok CDN links itself)
-async function getBuffer(url, referer = "https://www.tikwm.com/") {
+async function getBuffer(url, referer = "https://www.tikwm.com/", extraHeaders = {}) {
   const res = await axios.get(url, {
     responseType: "arraybuffer",
     timeout: 60000,
     maxContentLength: 100 * 1024 * 1024,
-    headers: { "User-Agent": UA, Referer: referer }
+    headers: { "User-Agent": UA, Referer: referer, ...extraHeaders }
   })
   const buf = Buffer.from(res.data)
   if (!buf.length) throw new Error("empty file")
@@ -171,28 +172,73 @@ function fallbackApi(api, url) {
     })
 }
 
-async function fetchTikTok(url) {
-  const tasks = [tikwm(url), ...TT_APIS.map(api => fallbackApi(api, url))]
+// Direct source: reads TikTok's own page (no third-party API needed)
+async function tiktokDirect(url) {
+  const res = await axios.get(url, {
+    timeout: TIMEOUT,
+    maxRedirects: 5,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept: "text/html,application/xhtml+xml"
+    }
+  })
+  const cookie = (res.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ")
+  const html = String(res.data)
+  const m = html.match(/<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/)
+  if (!m) throw new Error("direct: page data not found")
+  const json = JSON.parse(m[1])
+  const item = json?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct
+  if (!item) throw new Error("direct: video unavailable")
+  const video = item.video?.playAddr || item.video?.downloadAddr
+  if (!video) throw new Error("direct: no video url")
+  return {
+    video,
+    images: [],
+    audio: item.music?.playUrl,
+    title: item.desc,
+    author: item.author?.nickname,
+    headers: { Cookie: cookie, Referer: "https://www.tiktok.com/" }
+  }
+}
 
-  // Optional extra source: npm i btch-downloader
+// Runs all sources, first success wins. Collects every failure reason.
+async function fetchTikTok(url) {
+  const sources = {
+    tikwm: () => tikwm(url),
+    direct: () => tiktokDirect(url)
+  }
+  TT_APIS.forEach((api, i) => (sources["api" + (i + 1)] = () => fallbackApi(api, url)))
+
   try {
     const { ttdl } = require("btch-downloader")
-    tasks.push(
+    sources.btch = () =>
       ttdl(url).then(r => {
         const video = r?.video?.[0] || pickVideo(r)
         if (!video) throw new Error("no video")
-        return {
-          video,
-          images: [],
-          audio: r?.audio?.[0],
-          title: r?.title,
-          author: r?.author
-        }
+        return { video, images: [], audio: r?.audio?.[0], title: r?.title, author: r?.author }
       })
-    )
   } catch {}
 
-  return Promise.any(tasks)
+  const errors = []
+  const tasks = Object.entries(sources).map(([name, fn]) =>
+    fn().catch(e => {
+      const why = e?.response?.status
+        ? `HTTP ${e.response.status}`
+        : e?.code || e?.message || "unknown"
+      errors.push(`${name}: ${why}`)
+      throw e
+    })
+  )
+
+  try {
+    return await Promise.any(tasks)
+  } catch {
+    const err = new Error("all sources failed -> " + errors.join(" | "))
+    err.reasons = errors
+    throw err
+  }
 }
 
 // Clean TikTok link (removes tracking junk, keeps short links working)
@@ -202,9 +248,9 @@ function extractTikTokUrl(text) {
 }
 
 // Sends video as a buffer first (most reliable), falls back to URL
-async function sendVideo(ednut, m, videoUrl, caption) {
+async function sendVideo(ednut, m, videoUrl, caption, headers = {}) {
   try {
-    const buffer = await getBuffer(videoUrl)
+    const buffer = await getBuffer(videoUrl, headers.Referer || "https://www.tikwm.com/", headers)
     return await ednut.sendMessage(
       m.chat,
       { video: buffer, mimetype: "video/mp4", fileName: "tiktok.mp4", caption },
@@ -312,10 +358,13 @@ module.exports = [
           return
         }
 
-        await sendVideo(ednut, m, data.video, caption)
+        await sendVideo(ednut, m, data.video, caption, data.headers || {})
       } catch (err) {
-        global.log("ERROR", err)
-        reply("❌ TikTok download failed. The link may be private, removed, or unsupported.")
+        global.log("ERROR", err.message || err)
+        reply(
+          "❌ TikTok download failed." +
+            (DEBUG && err.reasons ? "\n\n🛠 Debug:\n" + err.reasons.join("\n") : "")
+        )
       }
     }
   },
