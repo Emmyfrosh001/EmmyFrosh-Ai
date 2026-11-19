@@ -21,7 +21,7 @@ module.exports = [
 
         let satu, dua;
         if (!rawInput) {
-          satu = "EMMYFROSH";
+          satu = "𝛯⁠𝛭⁠𝛭⁠𝑌⁠𝐹⁠𝑅⁠𝛩⁠𝑆⁠𝛨 💔";
           dua  = "";
         } else {
           let ahuh = rawInput.split("|");
@@ -107,7 +107,7 @@ module.exports = [
         const rawInput = args.join(" ").trim();
         let satu, dua;
         if (!rawInput) {
-          satu = "EMMYFROSH";
+          satu = "𝛯⁠𝛭⁠𝛭⁠𝑌⁠𝐹⁠𝑅⁠𝛩⁠𝑆⁠𝛨 💔";
           dua  = "";
         } else {
           let ahuh = rawInput.split("|");
