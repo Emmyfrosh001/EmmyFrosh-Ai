@@ -1,4 +1,8 @@
 const axios = require("axios")
+const fs = require("fs")
+const os = require("os")
+const path = require("path")
+const { execFile } = require("child_process")
 
 // =========================
 // CONFIG
@@ -6,7 +10,7 @@ const axios = require("axios")
 const MONEYBLINK_KEY =
   process.env.MONEYBLINK_KEY || "524de9dbd18357810a9e6b76810ace32d81a7d5f" // regenerate this if the file was shared publicly
 const TIMEOUT = 20000
-const DEBUG = true // true = bot replies with the real failure reasons (turn off once it works)
+const DEBUG = true // true = failed downloads also show the reason (success messages are unchanged)
 const UA =
   "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
@@ -19,6 +23,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 function pickVideo(json) {
   const s = JSON.stringify(json).replace(/\\\//g, "/")
   const links = [...s.matchAll(/https?:\/\/[^"\s\\]+/g)].map(x => x[0])
+    .filter(l => !/^https?:\/\/(www\.|vt\.|vm\.|m\.)?tiktok\.com\//i.test(l))
   const videos = links.filter(l => /\.mp4|video|fbcdn|cdninstagram|download/i.test(l))
   return videos.find(l => /hd/i.test(l)) || videos[0] || null
 }
@@ -45,15 +50,39 @@ function absUrl(u, base = "https://www.tikwm.com") {
 
 // Downloads a file into a Buffer (WhatsApp often can't fetch TikTok CDN links itself)
 async function getBuffer(url, referer = "https://www.tikwm.com/", extraHeaders = {}) {
-  const res = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: 60000,
-    maxContentLength: 100 * 1024 * 1024,
-    headers: { "User-Agent": UA, Referer: referer, ...extraHeaders }
-  })
-  const buf = Buffer.from(res.data)
-  if (!buf.length) throw new Error("empty file")
-  return buf
+  const get = range =>
+    axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 60000,
+      maxContentLength: 100 * 1024 * 1024,
+      validateStatus: st => st === 200 || st === 206,
+      headers: { "User-Agent": UA, Referer: referer, ...extraHeaders, Range: range }
+    })
+
+  const res = await get("bytes=0-")
+  const type = String(res.headers["content-type"] || "")
+  if (/text|json|html/i.test(type)) throw new Error("server returned " + type)
+
+  const parts = [Buffer.from(res.data)]
+  let got = parts[0].length
+  if (!got) throw new Error("empty file")
+
+  if (res.status === 206) {
+    // Server may send the file in pieces: keep asking for the rest
+    const total = Number(String(res.headers["content-range"] || "").split("/")[1]) || 0
+    for (let i = 0; total && got < total && i < 60; i++) {
+      const r = await get(`bytes=${got}-`)
+      const piece = Buffer.from(r.data)
+      if (!piece.length) break
+      parts.push(piece)
+      got += piece.length
+    }
+    if (total && got < total) throw new Error(`truncated download (${got}/${total} bytes)`)
+  } else {
+    const expected = Number(res.headers["content-length"] || 0)
+    if (expected && got < expected) throw new Error(`truncated download (${got}/${expected} bytes)`)
+  }
+  return Buffer.concat(parts)
 }
 
 // =========================
@@ -128,7 +157,7 @@ async function tikwm(url) {
 
       if (data?.code === 0 && data.data) {
         const d = data.data
-        const video = absUrl(d.hdplay || d.play)
+        const video = absUrl(d.play || d.hdplay)
         const images = Array.isArray(d.images) ? d.images.map(i => absUrl(i)) : []
         if (!video && !images.length) throw new Error("tikwm: no media")
         return {
@@ -159,7 +188,11 @@ async function tikwm(url) {
 const TT_APIS = [
   u => `https://api.siputzx.my.id/api/d/tiktok?url=${encodeURIComponent(u)}`,
   u => `https://api.vreden.my.id/api/tiktok?url=${encodeURIComponent(u)}`,
-  u => `https://api.ryzendesu.vip/api/downloader/ttdl?url=${encodeURIComponent(u)}`
+  u => `https://api.ryzendesu.vip/api/downloader/ttdl?url=${encodeURIComponent(u)}`,
+  u => `https://api.siputzx.my.id/api/tiktok/v2?url=${encodeURIComponent(u)}`,
+  u => `https://api.tiklydown.eu.org/api/download/v5?url=${encodeURIComponent(u)}`,
+  u => `https://api.agatz.xyz/api/tiktok?url=${encodeURIComponent(u)}`,
+  u => `https://api.nyxs.pw/dl/tiktok?url=${encodeURIComponent(u)}`
 ]
 
 function fallbackApi(api, url) {
@@ -191,14 +224,23 @@ async function tiktokDirect(url) {
   const json = JSON.parse(m[1])
   const item = json?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct
   if (!item) throw new Error("direct: video unavailable")
-  const video = item.video?.playAddr || item.video?.downloadAddr
+  const h264 = (item.video?.bitrateInfo || []).find(b =>
+    /h264/i.test(b.CodecType || "")
+  )?.PlayAddr?.UrlList?.[0]
+  const video = h264 || item.video?.downloadAddr || item.video?.playAddr
   if (!video) throw new Error("direct: no video url")
   return {
     video,
     images: [],
     audio: item.music?.playUrl,
     title: item.desc,
-    author: item.author?.nickname,
+    author:
+      (typeof item.author === "object"
+        ? item.author?.nickname || item.author?.uniqueId
+        : item.author) ||
+      item.authorInfo?.nickname ||
+      item.authorInfo?.uniqueId ||
+      (res.request?.res?.responseUrl || "").match(/@([^/?]+)/)?.[1],
     headers: { Cookie: cookie, Referer: "https://www.tiktok.com/" }
   }
 }
@@ -232,13 +274,15 @@ async function fetchTikTok(url) {
     })
   )
 
-  try {
-    return await Promise.any(tasks)
-  } catch {
-    const err = new Error("all sources failed -> " + errors.join(" | "))
+  const results = await Promise.allSettled(tasks)
+  const candidates = results.filter(r => r.status === "fulfilled").map(r => r.value)
+  if (!candidates.length) {
+    const err = new Error("all sources failed")
     err.reasons = errors
     throw err
   }
+  candidates.errors = errors
+  return candidates
 }
 
 // Clean TikTok link (removes tracking junk, keeps short links working)
@@ -247,22 +291,105 @@ function extractTikTokUrl(text) {
   return m ? m[0] : null
 }
 
-// Sends video as a buffer first (most reliable), falls back to URL
-async function sendVideo(ednut, m, videoUrl, caption, headers = {}) {
+const why = e =>
+  e?.response?.status ? `HTTP ${e.response.status}` : e?.code || e?.message || String(e)
+
+// Rejects HTML/JSON error pages that servers return instead of a real video
+function assertVideo(buf) {
+  const head = buf.slice(0, 1).toString()
+  if (head === "<" || head === "{") throw new Error("not a video file")
+  if (buf.length < 150 * 1024) throw new Error(`too small (${(buf.length / 1024).toFixed(0)} KB)`)
+  if (buf.slice(4, 8).toString("latin1") !== "ftyp") throw new Error("not an mp4 (no ftyp)")
+  if (!buf.includes("moov")) throw new Error("incomplete video (no moov, would show 0:00)")
+}
+
+// Converts to H.264/AAC mp4 so every WhatsApp client can play it.
+// Needs ffmpeg on the server (or: npm i @ffmpeg-installer/ffmpeg). Falls back to the original file.
+function ffmpegPath() {
   try {
-    const buffer = await getBuffer(videoUrl, headers.Referer || "https://www.tikwm.com/", headers)
-    return await ednut.sendMessage(
-      m.chat,
-      { video: buffer, mimetype: "video/mp4", fileName: "tiktok.mp4", caption },
-      { quoted: m }
-    )
+    return require("@ffmpeg-installer/ffmpeg").path
   } catch {
-    return ednut.sendMessage(
-      m.chat,
-      { video: { url: videoUrl }, mimetype: "video/mp4", fileName: "tiktok.mp4", caption },
-      { quoted: m }
-    )
+    return "ffmpeg"
   }
+}
+
+async function toPlayable(buf) {
+  const id = Date.now() + "-" + Math.random().toString(36).slice(2)
+  const inp = path.join(os.tmpdir(), `tt-${id}-in.mp4`)
+  const out = path.join(os.tmpdir(), `tt-${id}-out.mp4`)
+  try {
+    fs.writeFileSync(inp, buf)
+    await new Promise((res, rej) =>
+      execFile(
+        ffmpegPath(),
+        ["-y", "-i", inp, "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-movflags", "+faststart", out],
+        { timeout: 120000 },
+        (e, so, se) => (e ? rej(Object.assign(e, { stderr: se })) : res())
+      )
+    )
+    const converted = fs.readFileSync(out)
+    if (converted.length < 10000) return { buf, converted: false, note: "ffmpeg output too small" }
+    return { buf: converted, converted: true, note: "ok" }
+  } catch (e) {
+    const note = e.code === "ENOENT" ? "ffmpeg NOT installed" : "ffmpeg failed: " + String(e.stderr || e.message).slice(-150)
+    return { buf, converted: false, note }
+  } finally {
+    for (const f of [inp, out]) {
+      try { fs.unlinkSync(f) } catch {}
+    }
+  }
+}
+
+// Downloads one candidate, retrying with different Referer headers on 401/403
+async function downloadVideo(c) {
+  const h = c.headers || {}
+  let origin = ""
+  try { origin = new URL(c.video).origin + "/" } catch {}
+  const referers = [...new Set([h.Referer, origin, "https://www.tiktok.com/", "https://www.tikwm.com/"].filter(Boolean))]
+  let lastErr
+  for (const ref of referers) {
+    try {
+      const buf = await getBuffer(c.video, ref, { ...h, Referer: ref })
+      assertVideo(buf)
+      return buf
+    } catch (e) {
+      lastErr = e
+      const st = e?.response?.status
+      if (st !== 403 && st !== 401) throw e
+    }
+  }
+  throw lastErr
+}
+
+// Looks up the author separately (some download sources don't return it)
+async function fetchAuthor(url) {
+  // 1) TikTok's public oEmbed endpoint
+  try {
+    const { data } = await axios.get("https://www.tiktok.com/oembed", {
+      params: { url },
+      timeout: 8000,
+      headers: { "User-Agent": UA }
+    })
+    const name = data?.author_name
+    const handle = data?.author_unique_id
+    if (name && handle && name.toLowerCase() !== handle.toLowerCase()) return `${name} (${handle})`
+    if (name || handle) return name || handle
+  } catch {}
+
+  // 2) Username in the redirect target of the short link
+  try {
+    const r = await axios.get(url, {
+      maxRedirects: 0,
+      validateStatus: st => st >= 200 && st < 400,
+      timeout: 8000,
+      headers: { "User-Agent": UA }
+    })
+    const user = String(r.headers?.location || "").match(/@([^/?]+)/)?.[1]
+    if (user) return user
+  } catch {}
+
+  return null
 }
 
 module.exports = [
@@ -345,25 +472,62 @@ module.exports = [
       try {
         await reply("⏳ Downloading TikTok video...")
 
-        const data = await fetchTikTok(link)
-        const caption =
-          `🎵 *${data.title || "TikTok Video"}*\n\n` +
-          `👤 Author: ${data.author || "Unknown"}\n\n${global.footer}`
+        const problems = []
 
-        // Photo slideshow post
-        if (!data.video && data.images?.length) {
-          for (const img of data.images.slice(0, 10)) {
-            await ednut.sendMessage(m.chat, { image: { url: img } }, { quoted: m })
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt) await sleep(1500)
+
+          let candidates
+          try {
+            candidates = await fetchTikTok(link)
+          } catch (e) {
+            problems.push(...(e.reasons || [why(e)]))
+            continue
           }
-          return
+
+          const title = candidates.find(c => c.title)?.title
+          const author = candidates.find(c => c.author)?.author || (await fetchAuthor(link))
+          const caption =
+            `🎵 *${title || "TikTok Video"}*\n\n` +
+            `👤 Author: ${author || "Unknown"}\n\n${global.footer || ""}`
+
+          // Photo slideshow post
+          const slide = candidates.find(c => !c.video && c.images?.length)
+          if (slide) {
+            for (const img of slide.images.slice(0, 10)) {
+              await ednut.sendMessage(m.chat, { image: { url: img } }, { quoted: m })
+            }
+            return
+          }
+
+          // Download each source, validate it, send the first real video
+          for (const c of candidates.filter(c => c.video)) {
+            try {
+              const buffer = await downloadVideo(c)
+              const info = await toPlayable(buffer)
+              await ednut.sendMessage(
+                m.chat,
+                { video: info.buf, mimetype: "video/mp4", fileName: "tiktok.mp4", caption },
+                { quoted: m }
+              )
+              return
+            } catch (e) {
+              problems.push(`${c.video.slice(0, 45)}… -> ${why(e)}`)
+            }
+          }
+
+          if (attempt === 2) problems.push(...(candidates.errors || []))
         }
 
-        await sendVideo(ednut, m, data.video, caption, data.headers || {})
+        // Never let WhatsApp fetch the link itself: it only gets a broken partial file
+        const err = new Error("could not download a valid video")
+        err.reasons = problems
+        throw err
       } catch (err) {
-        global.log("ERROR", err.message || err)
+        global.log("ERROR", err.reasons ? err.reasons.join(" | ") : err)
         reply(
           "❌ TikTok download failed." +
-            (DEBUG && err.reasons ? "\n\n🛠 Debug:\n" + err.reasons.join("\n") : "")
+            (DEBUG ? "\n\n🛠 Debug:\n" + ([...new Set(err.reasons || [])].join("\n") || why(err)) : "")
         )
       }
     }
