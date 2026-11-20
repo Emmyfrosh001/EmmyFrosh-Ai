@@ -9,7 +9,7 @@ module.exports = [
     command: ["ttt"],
     alias: ["tictactoe", "xo"],
     description: "Start a Tic Tac Toe game in a group",
-    category: "Game",
+    category: "Games",
     use: "<opponent-number>",
     ban: true,
     gcban: true,
