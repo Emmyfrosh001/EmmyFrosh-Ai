@@ -557,7 +557,7 @@ const getTime = () => moment.tz(global.timezone).format("HH:mm:ss");
 
 const ALL_CATEGORIES = [
   "EnvManager","Info","Fun","Ai","Group","Owner","Other","Logo",
-  "Search","Converter","Maker","Game","Tool","Downloader", "Economy","Sport","Wa","External","Nsfw","Settings","Privacy"
+  "Search","Converter","Maker","Games","Tool","Downloader", "Economy","Sport","Wa","External","Nsfw","Settings","Privacy"
 ];
 const CATEGORY_SET = new Set(ALL_CATEGORIES.map(c => c.toLowerCase()));
 
