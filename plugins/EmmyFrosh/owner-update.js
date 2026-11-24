@@ -2,7 +2,24 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require("path");
 const AdmZip = require("adm-zip");
-const { Sequelize, DataTypes } = require('sequelize');
+
+// The commit hash is kept in a tiny JSON file instead of SQLite. The sqlite3
+// native module has no compiled binding for this host's Node version, which
+// crashed the command before it could reply. A .json file is also never
+// overwritten by updates (copyFolderSync skips *.json), so it persists.
+const HASH_FILE = path.join(__dirname, 'update_hash.json');
+
+function getCommitHash() {
+  try {
+    return JSON.parse(fs.readFileSync(HASH_FILE, 'utf8')).commitHash || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function setCommitHash(hash) {
+  fs.writeFileSync(HASH_FILE, JSON.stringify({ commitHash: hash }, null, 2));
+}
 
 module.exports = {
   command: "update",
@@ -14,10 +31,19 @@ module.exports = {
   async execute(m, { ednut, args, reply, isOwner }) {
     if (!isOwner) return reply("*📛 This command is restricted to owners only.*");
 
-    const react = (emoji) => ednut.sendMessage(m.chat, { react: { text: emoji, key: m.key } });
+    const react = (emoji) =>
+      ednut.sendMessage(m.chat, { react: { text: emoji, key: m.key } }).catch(() => {});
     const clearReaction = () => react(""); // empty text removes the reaction
 
-    await react("🔎");
+    // Always send a visible message; fall back to sendMessage if reply fails.
+    const say = async (text) => {
+      try {
+        return await reply(text);
+      } catch (e) {
+        console.error("reply failed, falling back to sendMessage:", e);
+        return ednut.sendMessage(m.chat, { text }, { quoted: m });
+      }
+    };
 
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -25,38 +51,15 @@ module.exports = {
     // checks and reports — it never downloads or restarts anything.
     const shouldApply = (args[0] || "").toLowerCase() === "now";
 
-    // Initialize SQLite DB for commit hash
-    const DATABASE = new Sequelize({
-      dialect: 'sqlite',
-      storage: path.join(__dirname, 'update.db'),
-      logging: false
-    });
-
-    const UpdateDB = DATABASE.define('UpdateInfo', {
-      id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: false, defaultValue: 1 },
-      commitHash: { type: DataTypes.STRING, allowNull: false },
-    }, { tableName: 'update_info', timestamps: false });
-
-    await UpdateDB.sync();
-
-    async function getCommitHash() {
-      const record = await UpdateDB.findByPk(1);
-      return record ? record.commitHash : 'unknown';
-    }
-
-    async function setCommitHash(hash) {
-      let record = await UpdateDB.findByPk(1);
-      if (!record) record = await UpdateDB.create({ id: 1, commitHash: hash });
-      else record.commitHash = hash;
-      await record.save();
-    }
-
     try {
+      await react("🔎");
+
       const { data: commitData } = await axios.get(
-        "https://api.github.com/repos/Emmyfrosh001/EmmyFrosh-Ai/commits/main"
+        "https://api.github.com/repos/Emmyfrosh001/EmmyFrosh-Ai/commits/main",
+        { headers: { "User-Agent": "EmmyFrosh-Ai-Updater" }, timeout: 20000 }
       );
 
-      const currentHash = await getCommitHash();
+      const currentHash = getCommitHash();
       const newHash = commitData.sha;
       const commitAuthor = commitData.commit?.author?.name || "unknown";
       const commitDateObj = commitData.commit?.author?.date ? new Date(commitData.commit.author.date) : null;
@@ -69,7 +72,7 @@ module.exports = {
 
       if (currentHash === newHash) {
         await clearReaction();
-        return reply("✔️ *Bot is up to date!*");
+        return await say("✔️ *Bot is up to date!*");
       }
 
       // There IS an update.
@@ -86,61 +89,52 @@ module.exports = {
 ━━━━━━━━━━━━━━━━━━━━`;
 
       if (!shouldApply) {
-        // Report-only path: tell them what's new, but stop here.
         await clearReaction();
-        return reply(updateCard);
+        return await say(updateCard);
       }
 
-      // shouldApply === true: skip the "Update Available" card (they
-      // already know — that's why they typed "now") and go straight
-      // into download, extract, copy, restart.
-      await clearReaction();
+      // shouldApply === true: download, extract, copy, restart.
+      await react("⬇️");
 
-      // Set zip and temp paths to one directory up (project root)
+      // Zip and temp paths go in the project root (two directories up)
       const projectRoot = path.resolve(__dirname, '..', '..');
       const zipPath = path.join(projectRoot, "update_temp.zip");
       const tempUpdatePath = path.join(projectRoot, 'temp_update');
 
-      fs.writeFileSync(
-        zipPath,
-        (await axios.get("https://github.com/Emmyfrosh001/EmmyFrosh-Ai/archive/main.zip", {
-          responseType: "arraybuffer"
-        })).data
+      const zipRes = await axios.get(
+        "https://github.com/Emmyfrosh001/EmmyFrosh-Ai/archive/main.zip",
+        { responseType: "arraybuffer", timeout: 120000, headers: { "User-Agent": "EmmyFrosh-Ai-Updater" } }
       );
+      fs.writeFileSync(zipPath, zipRes.data);
 
       new AdmZip(zipPath).extractAllTo(tempUpdatePath, true);
 
-      // GitHub names the extracted folder after the repo's *actual* casing
-      // (e.g. "EmmyFrosh-Ai-main"), not a guessed/hardcoded name. Detect it
-      // instead of assuming — a hardcoded name that doesn't match silently
-      // skips the whole copy (copyFolderSync just returns if the source
-      // folder isn't found), so ".update now" would report success and
-      // restart without actually changing a single file.
-      const extractedEntries = fs.readdirSync(tempUpdatePath, { withFileTypes: true });
-      const extractedFolder = extractedEntries.find(e => e.isDirectory());
+      // GitHub names the extracted folder after the repo's actual casing
+      // (e.g. "EmmyFrosh-Ai-main"), so detect it instead of hardcoding.
+      const extractedFolder = fs
+        .readdirSync(tempUpdatePath, { withFileTypes: true })
+        .find(e => e.isDirectory());
 
       if (!extractedFolder) {
         throw new Error("Update archive did not contain the expected folder.");
       }
 
-      copyFolderSync(
-        path.join(tempUpdatePath, extractedFolder.name),
-        projectRoot
-      );
+      copyFolderSync(path.join(tempUpdatePath, extractedFolder.name), projectRoot);
 
-      await setCommitHash(newHash);
+      setCommitHash(newHash);
 
       fs.unlinkSync(zipPath);
-      fs.rmSync(tempUpdatePath, { recursive: true });
+      fs.rmSync(tempUpdatePath, { recursive: true, force: true });
 
-      await reply("✅ *Updated! Restarting now...*");
+      await clearReaction();
+      await say("✅ *Updated! Restarting now...*");
       await sleep(1000);
       process.exit(42); // MANUAL_RESTART_CODE — tells index.js this restart was intentional
 
     } catch (error) {
       console.error("Update error:", error);
       await clearReaction();
-      reply(`❌ *Update failed*\n\n_${error.message}_`);
+      await say(`❌ *Update failed*\n\n_${error.message}_`);
     }
   }
 };
