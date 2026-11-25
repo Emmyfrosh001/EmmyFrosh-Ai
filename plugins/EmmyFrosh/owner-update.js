@@ -77,7 +77,7 @@ module.exports = {
       if (!currentHash) {
         setCommitHash(newHash);
         await clearReaction();
-        return await say("✔️ *Bot is up to date!* (baseline saved)");
+        return await say("✔️ *Bot is up to date!*");
       }
 
       const commitAuthor = commitData.commit?.author?.name || "unknown";
