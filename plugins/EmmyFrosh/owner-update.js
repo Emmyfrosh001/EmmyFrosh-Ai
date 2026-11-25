@@ -9,11 +9,14 @@ const AdmZip = require("adm-zip");
 // overwritten by updates (copyFolderSync skips *.json), so it persists.
 const HASH_FILE = path.join(__dirname, 'update_hash.json');
 
+// Returns the saved commit hash, or null if no baseline has ever been set
+// (fresh deploy, or an older deploy from before this file existed).
 function getCommitHash() {
   try {
-    return JSON.parse(fs.readFileSync(HASH_FILE, 'utf8')).commitHash || 'unknown';
+    const saved = JSON.parse(fs.readFileSync(HASH_FILE, 'utf8')).commitHash;
+    return saved || null;
   } catch {
-    return 'unknown';
+    return null;
   }
 }
 
@@ -61,6 +64,22 @@ module.exports = {
 
       const currentHash = getCommitHash();
       const newHash = commitData.sha;
+
+      // ✅ FIX: no baseline yet (fresh/older deploy with no update_hash.json).
+      // Previously this fell back to the string "unknown", which could never
+      // equal a real commit SHA, so the very first .update after any deploy
+      // ALWAYS reported "Update Available" — even when the running code was
+      // already current. There's no reliable way to compare what's actually
+      // running against GitHub without a baseline, so instead of guessing
+      // "out of date" we adopt GitHub's current commit AS the baseline and
+      // report up to date. This also means plain ".update" never silently
+      // downloads/overwrites anything — only ".update now" ever does that.
+      if (!currentHash) {
+        setCommitHash(newHash);
+        await clearReaction();
+        return await say("✔️ *Bot is up to date!* (baseline saved)");
+      }
+
       const commitAuthor = commitData.commit?.author?.name || "unknown";
       const commitDateObj = commitData.commit?.author?.date ? new Date(commitData.commit.author.date) : null;
       const commitDateStr = commitDateObj
