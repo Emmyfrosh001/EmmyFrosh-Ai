@@ -26,6 +26,13 @@ const normalizeGroupId = (id) => {
   return `${id}@g.us`;
 };
 
+// digits-only comparison, used instead of raw JID equality: ednut.user.id usually
+// carries a ":<device>" suffix (e.g. "2348012345678:12@s.whatsapp.net") that a
+// plain participant JID never has, so a direct string match against it can
+// silently fail even when it's really the same account.
+const digits = (jid) => String(jid || '').split(':')[0].split('@')[0].replace(/\D/g, '');
+const sameAccount = (a, b) => { const da = digits(a); return !!da && da === digits(b); };
+
 const toSmallCaps = (text) => {
   const map = {
     a:'ᴀ',b:'ʙ',c:'ᴄ',d:'ᴅ',e:'ᴇ',f:'ꜰ',g:'ɢ',h:'ʜ',i:'ɪ',j:'ᴊ',
@@ -161,8 +168,11 @@ module.exports = function groupParticipantsUpdate(ednut) {
             });
           }
 
-          // .antidemotion on → someone promoted? demote them back + notify
-          if (antiDemotionEnabled && authorJid !== botId) {
+          // .antidemotion on → someone promoted? demote them back + notify.
+          // EXCEPT: never auto-revert a promotion of the BOT ITSELF — that was
+          // the bug: promoting the bot while this setting was on always got
+          // instantly undone, with no way to actually keep the bot as admin.
+          if (antiDemotionEnabled && !sameAccount(authorJid, botId) && !sameAccount(jid, botId)) {
             await ednut.groupParticipantsUpdate(groupId, [jid], "demote");
             invalidateGroupMetadataCache(groupId);
             await ednut.sendMessage(groupId, {
@@ -184,7 +194,7 @@ module.exports = function groupParticipantsUpdate(ednut) {
           }
 
           // .antipromotion on → someone demoted? re-promote them back + notify
-          if (antiPromotionEnabled && authorJid !== botId) {
+          if (antiPromotionEnabled && !sameAccount(authorJid, botId)) {
             await ednut.groupParticipantsUpdate(groupId, [jid], "promote");
             invalidateGroupMetadataCache(groupId);
             await ednut.sendMessage(groupId, {
